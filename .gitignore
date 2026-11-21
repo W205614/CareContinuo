@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+.taste-skill/
+.local/
+target/
+node_modules/
+dist/
+test-results/
+playwright-report/
+.venv/
+.pytest_cache/
+__pycache__/
+*.pyc
