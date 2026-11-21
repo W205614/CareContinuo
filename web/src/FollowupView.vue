@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { api, mutate, type Actor } from './api'
 import { feedbackKinds, followupStates, type CareEpisode, type Directory, type DocumentVersion, type Followup, type Source } from './followup'
 import { fromShanghaiInput, shanghaiTime } from './time'
+import AgentSuggestions, { type Candidate } from './AgentSuggestions.vue'
 
 const props = defineProps<{ actor: Actor }>()
 const patient = props.actor.roles.includes('PATIENT')
@@ -30,6 +31,7 @@ const active = computed(() => !!detail.value && ['DISPATCHED', 'PATIENT_REPLIED'
 const canEdit = computed(() => !!detail.value && ['DRAFT', 'APPROVED'].includes(detail.value.status) && detail.value.ownerId === props.actor.id)
 const canManage = computed(() => !!detail.value && !['VERIFIED', 'CLOSED'].includes(detail.value.status) && detail.value.ownerId === props.actor.id)
 const canReview = computed(() => !!detail.value && reviewer && detail.value.reviewerId === props.actor.id)
+const sourceVersion = computed(() => episodes.value.find((item) => item.id === episodeId.value)?.sourceVersion ?? 0)
 
 async function refresh() {
   tasks.value = await api<Followup[]>('/followups')
@@ -128,6 +130,13 @@ function saveDraft() {
   }, '草稿已保存。')
 }
 
+function adopt(candidate: Candidate) {
+  const previous = draft.value
+  draft.value = { reviewerId: previous.reviewerId, kind: candidate.kind, title: candidate.title,
+    instructions: candidate.instructions, dueAt: candidate.dueDate ? `${candidate.dueDate}T17:00` : '',
+    segmentIds: [...new Set(candidate.references.map((item) => item.segmentId))], manualReference: '' }
+}
+
 function apply(name: string) {
   const item = detail.value
   if (!item) return
@@ -174,6 +183,7 @@ onMounted(async () => {
           </form>
           <ul class="record-list"><li v-for="item in documents" :key="item.versionId" class="record"><span>{{ item.title }} · 版本 {{ item.versionNumber }}</span><a :href="`/api/v1/episodes/${episodeId}/versions/${item.versionId}/download`">下载附件</a></li></ul>
         </details>
+        <AgentSuggestions :episode-id="episodeId" :source-version="sourceVersion" @use="adopt" />
         <form class="panel draft-form" @submit.prevent="saveDraft">
           <h3>{{ editing ? `更正随访草稿 ${editing}` : '新建随访草稿' }}</h3>
           <div class="field-grid">

@@ -117,9 +117,12 @@ public class Notifications {
 
     private boolean dispatchable(Pending event) {
         return jdbc.sql("""
-                select exists(select 1 from followup_task where id = ? and published_revision_id = ?
-                  and not needs_review and (status in ('DISPATCHED', 'PATIENT_REPLIED')
-                    or (? <> 'FOLLOWUP_DUE' and status in ('VERIFIED', 'CLOSED'))))
+                select exists(select 1 from followup_task t join care_episode e on e.id = t.episode_id
+                  where t.id = ? and t.published_revision_id = ? and not t.needs_review
+                    and (t.status in ('DISPATCHED', 'PATIENT_REPLIED')
+                    or (? <> 'FOLLOWUP_DUE' and t.status in ('VERIFIED', 'CLOSED')))
+                    and not exists(select 1 from agent_job j where j.episode_id = e.id
+                      and j.source_version = e.source_version and j.status = 'CONFLICT'))
                 """).params(event.objectId(), event.revisionId(), event.kind()).query(Boolean.class).single();
     }
 

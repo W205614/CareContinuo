@@ -16,6 +16,8 @@ services:
       retries: 20
   agent:
     build: ./agent
+    environment:
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-6.2-sol}
     networks: [model]
     healthcheck:
       test: [CMD, python, -c, "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health', timeout=2)"]
@@ -33,6 +35,7 @@ services:
       CARE_DB_USER: carecontinuo
       CARE_DB_PASSWORD: ${CARE_DB_PASSWORD:-local-demo-db}
       CARE_DEMO_PASSWORD: ${CARE_DEMO_PASSWORD:-demo-care-2026}
+      CARE_AGENT_URL: http://agent:8000
     networks: [data, model, browser]
     healthcheck:
       test: [CMD, curl, -fsS, http://127.0.0.1:8080/api/v1/status]

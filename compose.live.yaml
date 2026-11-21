@@ -1,0 +1,8 @@
+services:
+  agent:
+    secrets:
+      - openai_api_key
+
+secrets:
+  openai_api_key:
+    file: ${CARE_OPENAI_KEY_FILE:?Set CARE_OPENAI_KEY_FILE to the path of a local key file}

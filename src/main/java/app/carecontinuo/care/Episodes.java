@@ -174,6 +174,11 @@ public class Episodes {
     }
 
     private void invalidate(long episodeId) {
+        jdbc.sql("""
+                update work_item w set status = 'DONE', resolved_at = now(), resolution = '资料版本已更新'
+                from agent_job j where w.kind = 'AGENT_CONFLICT' and w.status = 'OPEN' and w.object_id = j.id
+                  and j.episode_id = ? and j.source_version < (select source_version from care_episode where id = ?)
+                """).params(episodeId, episodeId).update();
         var tasks = jdbc.sql("""
                 update followup_task set status = 'DRAFT', needs_review = published_revision_id is not null
                 where episode_id = ? and status not in ('CLOSED', 'VERIFIED') returning id, owner_id

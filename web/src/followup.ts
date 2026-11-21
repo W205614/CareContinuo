@@ -1,4 +1,4 @@
-export interface CareEpisode { id: number; patient: string; patientId: number; reference: string; kind: string; careDate: string }
+export interface CareEpisode { id: number; patient: string; patientId: number; reference: string; kind: string; careDate: string; sourceVersion: number }
 export interface Choice { id: number; name: string }
 export interface Directory { patients: Choice[]; reviewers: Choice[]; owners: Choice[] }
 export interface Source { id: number; title: string; versionId: number; versionNumber: number; pageNumber: number | null; lineNumber: number; excerpt: string }

@@ -185,6 +185,11 @@ public class Followups {
     private void dispatch(Actor actor, Task task, Revision revision) {
         requireReviewer(actor, task);
         requireStatus(task, "APPROVED");
+        if (jdbc.sql("""
+                select exists(select 1 from agent_job where episode_id = ? and source_version = ? and status = 'CONFLICT')
+                """).params(task.episodeId(), revision.sourceVersion()).query(Boolean.class).single()) {
+            throw Problems.conflict("当前资料仍有冲突。请核实原文、更正资料并重新审核后派发。");
+        }
         var now = OffsetDateTime.now(clock);
         if (!revision.dueAt().isAfter(now)) throw Problems.conflict("随访期限已过，请更新草稿和期限后重新审核。");
         String kind = task.publishedRevisionId() == null ? "FOLLOWUP_PUBLISHED" : "FOLLOWUP_CORRECTION";
@@ -214,8 +219,9 @@ public class Followups {
                 update work_item w set owner_id = ? where w.status = 'OPEN' and w.owner_id = ? and (
                   (w.object_id = ? and w.kind in ('FOLLOWUP_OVERDUE', 'SOURCE_CHANGED', 'PATIENT_FEEDBACK', 'FOLLOWUP_TRANSFER'))
                   or (w.kind = 'NOTIFICATION_FAILED' and w.object_id in
-                    (select id from outbox_event where episode_id = ? and object_id = ?)))
-                """).params(owner, actor.id(), task.id(), task.episodeId(), task.id()).update();
+                    (select id from outbox_event where episode_id = ? and object_id = ?))
+                  or (w.kind = 'AGENT_CONFLICT' and w.object_id in (select id from agent_job where episode_id = ?)))
+                """).params(owner, actor.id(), task.id(), task.episodeId(), task.id(), task.episodeId()).update();
         notices.openWork("FOLLOWUP_TRANSFER", task.id(), "FOLLOWUP", owner, OffsetDateTime.now(clock));
         feedback(actor, task, "CONTACT", "任务转派 · " + reason);
     }
