@@ -18,7 +18,11 @@ public class Notifications {
     private static final Logger LOG = LoggerFactory.getLogger(Notifications.class);
     private static final List<Integer> RETRY_MINUTES = List.of(1, 5, 15);
     private static final String INBOX_SQL = """
-            select m.id, e.kind, e.object_id, e.title, m.created_at, m.read_at
+            select m.id, e.kind, e.object_id, e.title, m.created_at, m.read_at, m.corrected_at,
+              (select max(new_m.id) from inbox_message new_m join outbox_event new_e on new_m.event_id = new_e.id
+               where new_e.kind = 'FOLLOWUP_CORRECTION' and new_e.object_id = e.object_id
+               and new_e.episode_id = e.episode_id and new_e.revision_id > e.revision_id
+               and new_m.recipient_user_id = m.recipient_user_id and new_m.corrected_at is null) as replacement_id
             from inbox_message m join outbox_event e on e.id = m.event_id where m.recipient_user_id = ?
             """;
 
@@ -40,6 +44,16 @@ public class Notifications {
                 """).params(key, kind, objectId, title, at, patientId).update();
     }
 
+    public void enqueueFollowup(long patientId, long episodeId, long taskId, long revisionId, String kind,
+                                String title, OffsetDateTime at) {
+        jdbc.sql("""
+                insert into outbox_event(dedupe_key, recipient_user_id, kind, object_id, title, available_at,
+                    episode_id, revision_id)
+                select ?, id, ?, ?, ?, ?, ?, ? from app_user where patient_id = ?
+                on conflict(dedupe_key) do nothing
+                """).params(kind + ":" + revisionId, kind, taskId, title, at, episodeId, revisionId, patientId).update();
+    }
+
     @Scheduled(fixedDelayString = "${care.notifications.poll-ms:2000}")
     void poll() {
         var ids = jdbc.sql("""
@@ -57,8 +71,14 @@ public class Notifications {
     }
 
     private void deliver(long id) {
+        lockEpisode(id);
         var event = pending(id);
         if (event == null) return;
+        if (event.episodeId() != null && !dispatchable(event)) {
+            jdbc.sql("update outbox_event set state = 'STALE' where id = ?").param(id).update();
+            closeWork("NOTIFICATION_FAILED", id, null, "当前版本不再适用此提醒");
+            return;
+        }
         jdbc.sql("""
                 insert into inbox_message(event_id, recipient_user_id) values (?, ?)
                 on conflict (event_id, recipient_user_id) do nothing
@@ -68,6 +88,7 @@ public class Notifications {
     }
 
     private void recordFailure(long id) {
+        lockEpisode(id);
         var event = pending(id);
         if (event == null) return;
         int attempts = event.attempts();
@@ -78,12 +99,33 @@ public class Notifications {
             return;
         }
         jdbc.sql("update outbox_event set attempts = attempts + 1, state = 'FAILED' where id = ?").param(id).update();
-        openWork("NOTIFICATION_FAILED", id, "OPERATIONS", null, now);
+        if (event.episodeId() == null) {
+            openWork("NOTIFICATION_FAILED", id, "OPERATIONS", null, now);
+        } else {
+            Long owner = jdbc.sql("select owner_id from followup_task where id = ?")
+                    .param(event.objectId()).query(Long.class).single();
+            openWork("NOTIFICATION_FAILED", id, "FOLLOWUP", owner, now);
+        }
+    }
+
+    // Document correction and message publication hold the same episode lock before touching events.
+    private void lockEpisode(long eventId) {
+        jdbc.sql("""
+                select e.id from care_episode e join outbox_event o on o.episode_id = e.id where o.id = ? for update of e
+                """).param(eventId).query(Long.class).optional();
+    }
+
+    private boolean dispatchable(Pending event) {
+        return jdbc.sql("""
+                select exists(select 1 from followup_task where id = ? and published_revision_id = ?
+                  and not needs_review and (status in ('DISPATCHED', 'PATIENT_REPLIED')
+                    or (? <> 'FOLLOWUP_DUE' and status in ('VERIFIED', 'CLOSED'))))
+                """).params(event.objectId(), event.revisionId(), event.kind()).query(Boolean.class).single();
     }
 
     private Pending pending(long id) {
         return jdbc.sql("""
-                select recipient_user_id, attempts from outbox_event
+                select recipient_user_id, attempts, episode_id, object_id, revision_id, kind from outbox_event
                 where id = ? and state = 'PENDING' and available_at <= ? for update
                 """).params(id, OffsetDateTime.now(clock)).query(Pending.class).optional().orElse(null);
     }
@@ -137,7 +179,8 @@ public class Notifications {
         if (matched == 0) throw Problems.missing();
     }
 
-    private record Pending(long recipientUserId, int attempts) { }
-    record Message(long id, String kind, long objectId, String title, OffsetDateTime createdAt, OffsetDateTime readAt) { }
+    private record Pending(long recipientUserId, int attempts, Long episodeId, long objectId, Long revisionId, String kind) { }
+    record Message(long id, String kind, long objectId, String title, OffsetDateTime createdAt, OffsetDateTime readAt,
+                   OffsetDateTime correctedAt, Long replacementId) { }
     record Work(long id, String kind, long objectId, String status, OffsetDateTime dueAt, String resolution) { }
 }

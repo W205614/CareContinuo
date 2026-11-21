@@ -3,7 +3,7 @@ import { onMounted, ref } from 'vue'
 import { api, mutate, type Actor } from './api'
 import { shanghaiTime } from './time'
 
-interface Message { id: number; kind: string; title: string; createdAt: string; readAt: string | null }
+interface Message { id: number; kind: string; title: string; createdAt: string; readAt: string | null; correctedAt: string | null; replacementId: number | null }
 interface Work { id: number; objectId: number; kind: string; status: string; dueAt: string; resolution: string | null }
 const props = defineProps<{ actor: Actor }>()
 const patient = props.actor.roles.includes('PATIENT')
@@ -11,7 +11,7 @@ const messages = ref<Message[]>([])
 const work = ref<Work[]>([])
 const selected = ref<Message>()
 const error = ref('')
-const kinds: Record<string, string> = { STOPPED_APPOINTMENT: '停诊预约', NOTIFICATION_FAILED: '通知发送失败' }
+const kinds: Record<string, string> = { STOPPED_APPOINTMENT: '停诊预约', NOTIFICATION_FAILED: '通知发送失败', SOURCE_CHANGED: '更新随访草稿', FOLLOWUP_REVIEW: '审核随访', FOLLOWUP_OVERDUE: '随访逾期', PATIENT_FEEDBACK: '患者反馈', FOLLOWUP_TRANSFER: '接手随访' }
 
 async function refresh() {
   try {
@@ -48,9 +48,12 @@ onMounted(refresh)
       <p v-if="!messages.length">暂无消息。</p>
       <ul class="record-list">
         <li v-for="item in messages" :key="item.id" class="record">
-          <div><strong>{{ item.title }}</strong><div>{{ shanghaiTime(item.createdAt) }} · {{ item.readAt ? '已读' : '未读' }}</div></div>
+          <div><strong>{{ item.title }}</strong><div>{{ shanghaiTime(item.createdAt) }} · {{ item.readAt ? '已读' : '未读' }}<span v-if="item.correctedAt"> · 已更正</span></div></div>
           <button class="secondary" type="button" @click="open(item.id)">查看消息</button>
-          <div v-if="selected?.id === item.id" class="message-detail">{{ selected.title }}。请在预约列表查看最新状态。</div>
+          <div v-if="selected?.id === item.id" class="message-detail">
+            <p>{{ selected.title }}。请在{{ selected.kind.startsWith('FOLLOWUP_') ? '我的随访' : '预约列表' }}查看最新状态。</p>
+            <button v-if="selected.replacementId" type="button" class="secondary" @click="open(selected.replacementId)">查看更正后的消息</button>
+          </div>
         </li>
       </ul>
     </template>

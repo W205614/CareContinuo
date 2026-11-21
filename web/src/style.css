@@ -54,6 +54,15 @@ h1, h2, p { margin: 0; }
 .field-grid label { display: flex; flex-direction: column; gap: .25rem; min-width: 0; }
 .field-grid input, .field-grid select, .field-grid textarea { max-width: 100%; }
 .field-grid textarea { min-height: 4rem; min-width: min(15rem, 85vw); }
+.followup-forms { margin: 1rem 0; }
+.followup-forms details, .followup-detail > p { margin: .75rem 0; }
+.episode-selection { display: flex; align-items: baseline; gap: .65rem; flex-wrap: wrap; }
+.draft-form { padding: .9rem 1.1rem 1.2rem; margin-top: 1rem; background: #eeede9; }
+.draft-form h3, .followup-detail h3 { margin: 0 0 .65rem; }
+.followup-detail { margin-top: 1rem; padding: 1.1rem; background: #eeede9; }
+.source-list { margin: .65rem 0; padding-left: 1.25rem; }
+.source-list li { margin: .3rem 0; overflow-wrap: anywhere; }
+.preserve-lines { white-space: pre-wrap; }
 @media (max-width: 760px) {
   .sign-in { grid-template-columns: 1fr; }
   .journey, .credentials { padding: 2rem 1.25rem; }
