@@ -3,6 +3,7 @@ package app.carecontinuo.followup;
 import app.carecontinuo.audit.AuditLog;
 import app.carecontinuo.care.Episodes;
 import app.carecontinuo.common.Problems;
+import app.carecontinuo.identity.Accounts;
 import app.carecontinuo.identity.Accounts.Actor;
 import app.carecontinuo.notification.Notifications;
 import jakarta.validation.constraints.NotBlank;
@@ -24,7 +25,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 public class Followups {
     private static final String TASK_SQL = """
             select t.id, t.episode_id, e.patient_id, t.owner_id, t.reviewer_id, t.status,
-                   t.version_number, t.published_revision_id, t.needs_review, e.reference, p.display_name as patient
+                   t.version_number, t.published_revision_id, t.needs_review, e.reference, p.display_name as patient, e.department_id
             from followup_task t join care_episode e on e.id = t.episode_id join patient p on p.id = e.patient_id
             """;
     private static final String REVISION_SQL = """
@@ -43,15 +44,17 @@ public class Followups {
 
     private final JdbcClient jdbc;
     private final Episodes episodes;
+    private final Accounts accounts;
     private final Notifications notices;
     private final AuditLog audit;
     private final Clock clock;
     private final TransactionTemplate transactions;
 
     Followups(JdbcClient jdbc, Episodes episodes, Notifications notices, AuditLog audit,
-              Clock clock, TransactionTemplate transactions) {
+              Clock clock, TransactionTemplate transactions, Accounts accounts) {
         this.jdbc = jdbc;
         this.episodes = episodes;
+        this.accounts = accounts;
         this.notices = notices;
         this.audit = audit;
         this.clock = clock;
@@ -65,8 +68,13 @@ public class Followups {
             return tasks.stream().map(task -> view(actor, task, false)).toList();
         }
         if (!actor.has("FOLLOWUP") && !actor.has("REVIEWER")) throw Problems.missing();
-        var tasks = jdbc.sql(TASK_SQL + " where (t.owner_id = ? and ? or t.reviewer_id = ? and ?) order by t.id desc limit 100")
-                .params(actor.id(), actor.has("FOLLOWUP"), actor.id(), actor.has("REVIEWER")).query(Task.class).list();
+        var tasks = jdbc.sql(TASK_SQL + """
+                where (t.owner_id = :staff and :followup or t.reviewer_id = :staff and :reviewer)
+                and (:demo or exists(select 1 from staff_department sd where sd.user_id = :staff
+                    and sd.department_id = e.department_id))
+                order by t.id desc limit 100
+                """).param("staff", actor.id()).param("followup", actor.has("FOLLOWUP"))
+                .param("reviewer", actor.has("REVIEWER")).param("demo", actor.demo()).query(Task.class).list();
         return tasks.stream().map(task -> view(actor, task, false)).toList();
     }
 
@@ -98,8 +106,10 @@ public class Followups {
     public long create(Actor actor, long episodeId, long reviewerId, Draft draft) {
         if (!actor.has("FOLLOWUP")) throw Problems.forbidden();
         var episode = episodes.lock(episodeId);
-        episodes.authorized(actor, episodeId);
-        episodes.requireAccountRole(reviewerId, "REVIEWER");
+        var current = accounts.actorById(actor.id());
+        if (!current.has("FOLLOWUP")) throw Problems.forbidden();
+        episodes.authorized(current, episodeId);
+        accounts.requireStaffRole(reviewerId, "REVIEWER", episode.departmentId());
         if (reviewerId == actor.id()) throw Problems.invalid("请选择另一位审核人。");
         long id = jdbc.sql("""
                 insert into followup_task(episode_id, owner_id, reviewer_id, status) values (?, ?, ?, 'DRAFT') returning id
@@ -112,6 +122,7 @@ public class Followups {
     public void edit(Actor actor, long id, int expectedVersion, Draft draft) {
         var episode = episodes.lock(load(id).episodeId());
         var task = load(id);
+        actor = accounts.actorById(actor.id());
         requireOwner(actor, task);
         expectVersion(task, expectedVersion);
         if (!List.of("DRAFT", "APPROVED").contains(task.status())) {
@@ -162,6 +173,7 @@ public class Followups {
     public void act(Actor actor, long id, ActionInput input) {
         var episode = episodes.lock(load(id).episodeId());
         var task = load(id);
+        actor = accounts.actorById(actor.id());
         authorize(actor, task);
         expectVersion(task, input.version());
         var revision = revision(task);
@@ -246,25 +258,85 @@ public class Followups {
         notices.closeWork("SOURCE_CHANGED", task.id(), actor.id(), "更正后的版本已派发");
     }
 
+    public AssignmentPage unassigned(Actor actor, long departmentId, Long afterId) {
+        if (!actor.has("ADMIN")) throw Problems.forbidden();
+        var rows = jdbc.sql("""
+                with candidates as (
+                select t.id, t.episode_id, e.department_id, t.status, t.owner_id, t.reviewer_id,
+                    not exists(select 1 from app_user u join user_role r on r.user_id = u.id
+                        join staff_department sd on sd.user_id = u.id
+                        where u.id = t.owner_id and u.enabled and r.role = 'FOLLOWUP'
+                          and sd.department_id = e.department_id) as owner_unavailable,
+                    not exists(select 1 from app_user u join user_role r on r.user_id = u.id
+                        join staff_department sd on sd.user_id = u.id
+                        where u.id = t.reviewer_id and u.enabled and r.role = 'REVIEWER'
+                          and sd.department_id = e.department_id) as reviewer_unavailable
+                from followup_task t join care_episode e on e.id = t.episode_id
+                where e.department_id = :department and t.id > :cursor and t.status not in ('VERIFIED','CLOSED')
+                )
+                select * from candidates where owner_unavailable or reviewer_unavailable order by id limit 51
+                """)
+                .param("department", departmentId).param("cursor", afterId == null ? 0L : afterId)
+                .query(Assignment.class).list();
+        return new AssignmentPage(rows.stream().limit(50).toList(), rows.size() > 50 ? rows.get(49).id() : null);
+    }
+
+    @Transactional
+    public void reassign(Actor actor, long id, Reassignment input) {
+        if (!actor.has("ADMIN")) throw Problems.forbidden();
+        episodes.lock(load(id).episodeId());
+        if (!accounts.actorById(actor.id()).has("ADMIN")) throw Problems.forbidden();
+        var task = load(id);
+        ensureOpen(task);
+        long owner = input.ownerId() == null ? task.ownerId() : input.ownerId();
+        long reviewer = input.reviewerId() == null ? task.reviewerId() : input.reviewerId();
+        if (owner == reviewer || (owner == task.ownerId() && reviewer == task.reviewerId())) {
+            throw Problems.invalid("请重新选择不同的负责人和审核人。");
+        }
+        if (owner != task.ownerId()) {
+            accounts.requireStaffRole(owner, "FOLLOWUP", task.departmentId());
+            moveOwner(task, owner);
+        }
+        if (reviewer != task.reviewerId()) {
+            accounts.requireStaffRole(reviewer, "REVIEWER", task.departmentId());
+            jdbc.sql("update followup_task set reviewer_id = ? where id = ?").params(reviewer, id).update();
+            jdbc.sql("""
+                    update work_item set owner_id = ? where status = 'OPEN'
+                    and kind = 'FOLLOWUP_REVIEW' and object_id = ?
+                    """).params(reviewer, id).update();
+        }
+        audit.record(actor.id(), "FOLLOWUP", id, "REASSIGN");
+    }
+
+    public record Reassignment(@Positive Long ownerId, @Positive Long reviewerId) { }
+    public record Assignment(long id, long episodeId, long departmentId, String status, long ownerId, long reviewerId,
+                             boolean ownerUnavailable, boolean reviewerUnavailable) { }
+    public record AssignmentPage(List<Assignment> assignments, Long nextCursor) { }
+
     private void transfer(Actor actor, Task task, Long owner, String reason) {
         requireOwner(actor, task);
         ensureOpen(task);
         if (owner == null || owner == actor.id()) throw Problems.invalid("请选择其他随访负责人。");
-        episodes.requireAccountRole(owner, "FOLLOWUP");
+        if (owner == task.reviewerId()) throw Problems.invalid("随访负责人不能同时审核该任务。");
+        accounts.requireStaffRole(owner, "FOLLOWUP", task.departmentId());
+        moveOwner(task, owner);
+        feedback(actor, task, "CONTACT", "任务转派 · " + reason);
+    }
+
+    private void moveOwner(Task task, long owner) {
         jdbc.sql("update followup_task set owner_id = ? where id = ?").params(owner, task.id()).update();
         jdbc.sql("""
                 update care_episode e set owner_id = ? where e.id = ? and e.owner_id = ?
                 and not exists(select 1 from followup_task t where t.episode_id = e.id and t.owner_id = e.owner_id)
-                """).params(owner, task.episodeId(), actor.id()).update();
+                """).params(owner, task.episodeId(), task.ownerId()).update();
         jdbc.sql("""
                 update work_item w set owner_id = ? where w.status = 'OPEN' and w.owner_id = ? and (
                   (w.object_id = ? and w.kind in ('FOLLOWUP_OVERDUE', 'SOURCE_CHANGED', 'PATIENT_FEEDBACK', 'FOLLOWUP_TRANSFER'))
                   or (w.kind = 'NOTIFICATION_FAILED' and w.object_id in
                     (select id from outbox_event where episode_id = ? and object_id = ?))
                   or (w.kind = 'AGENT_CONFLICT' and w.object_id in (select id from agent_job where episode_id = ?)))
-                """).params(owner, actor.id(), task.id(), task.episodeId(), task.id(), task.episodeId()).update();
+                """).params(owner, task.ownerId(), task.id(), task.episodeId(), task.id(), task.episodeId()).update();
         notices.openWork("FOLLOWUP_TRANSFER", task.id(), "FOLLOWUP", owner, OffsetDateTime.now(clock));
-        feedback(actor, task, "CONTACT", "任务转派 · " + reason);
     }
 
     @Scheduled(fixedDelayString = "${care.followup.poll-ms:5000}")
@@ -274,7 +346,7 @@ public class Followups {
                 .param(at).query(Task.class).list();
         for (var entry : overdue) {
             transactions.executeWithoutResult(status -> {
-                episodes.lock(entry.episodeId());
+                if (episodes.tryLock(entry.episodeId()) == null) return;
                 jdbc.sql(TASK_SQL + " where t.id = ? and " + OVERDUE).params(entry.id(), at)
                         .query(Task.class).optional().ifPresent(task ->
                                 notices.openWork("FOLLOWUP_OVERDUE", task.id(), "FOLLOWUP", task.ownerId(), at));
@@ -358,16 +430,17 @@ public class Followups {
     private static void authorize(Actor actor, Task task) {
         if (actor.has("PATIENT") && Long.valueOf(task.patientId()).equals(actor.patientId())
                 && task.publishedRevisionId() != null) return;
-        if (actor.has("FOLLOWUP") && task.ownerId() == actor.id() || actor.has("REVIEWER") && task.reviewerId() == actor.id()) return;
+        if (actor.inDepartment(task.departmentId()) && (actor.has("FOLLOWUP") && task.ownerId() == actor.id()
+                || actor.has("REVIEWER") && task.reviewerId() == actor.id())) return;
         throw Problems.missing();
     }
 
     private static void requireOwner(Actor actor, Task task) {
-        if (!actor.has("FOLLOWUP") || task.ownerId() != actor.id()) throw Problems.missing();
+        if (!actor.has("FOLLOWUP") || task.ownerId() != actor.id() || !actor.inDepartment(task.departmentId())) throw Problems.missing();
     }
 
     private static void requireReviewer(Actor actor, Task task) {
-        if (!actor.has("REVIEWER") || task.reviewerId() != actor.id()) throw Problems.missing();
+        if (!actor.has("REVIEWER") || task.reviewerId() != actor.id() || !actor.inDepartment(task.departmentId())) throw Problems.missing();
     }
 
     private static void expectVersion(Task task, int expected) {
@@ -412,7 +485,7 @@ public class Followups {
                            Long sourceEncounterId) { }
     public record Review(long id, String decision, String reason, OffsetDateTime createdAt) { }
     private record Task(long id, long episodeId, long patientId, long ownerId, long reviewerId, String status,
-                        int versionNumber, Long publishedRevisionId, boolean needsReview, String reference, String patient) { }
+                        int versionNumber, Long publishedRevisionId, boolean needsReview, String reference, String patient, long departmentId) { }
     private record Revision(long id, int versionNumber, int sourceVersion, String taskKind, String title,
                             String instructions, OffsetDateTime dueAt, String manualReference, LocalDate revisitFrom,
                             LocalDate revisitTo, Long revisitDepartmentId, String revisitDepartment) {

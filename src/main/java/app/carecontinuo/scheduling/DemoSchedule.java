@@ -9,7 +9,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 @Component
-@Profile("demo")
+@Profile("demo & !preprod")
 @Order(20)
 class DemoSchedule implements ApplicationRunner {
     private final JdbcClient jdbc;

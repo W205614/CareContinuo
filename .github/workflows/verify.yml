@@ -45,3 +45,41 @@ jobs:
         run: docker compose logs --no-color
       - if: always()
         run: docker compose down
+
+  preproduction:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CARE_PREPROD_ORIGIN: https://127.0.0.1:18443
+      CARE_PREPROD_FIXTURES: ../.local/preprod-ci
+      CARE_PREPROD_PROJECT: carecontinuo-preprod-ci
+      CARE_PREPROD_HOTSPOT_CLIENTS: '25'
+      CARE_TEST_PYTHON: python3
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci && npx playwright install --with-deps chromium
+        working-directory: web
+      - run: python3 deploy/preprod/prepare.py .local/preprod-ci
+      - run: docker compose -f compose.preprod.yaml --env-file .local/preprod-ci/compose.env -p "$CARE_PREPROD_PROJECT" build
+      - run: docker compose -f compose.preprod.yaml --env-file .local/preprod-ci/compose.env -p "$CARE_PREPROD_PROJECT" up --no-build --wait --wait-timeout 180
+      - run: |
+          curl --fail --silent --show-error --retry 15 --retry-all-errors --retry-delay 2 \
+            --cacert .local/preprod-ci/tls_cert.pem -o /dev/null \
+            "$CARE_PREPROD_ORIGIN/id/realms/care/.well-known/openid-configuration"
+          python3 deploy/preprod/control.py --env-file .local/preprod-ci/compose.env --project "$CARE_PREPROD_PROJECT" seed --patients 25
+      - run: npx playwright test -c playwright.preprod.config.ts
+        working-directory: web
+      - run: python3 deploy/preprod/upgrade.py --env-file .local/preprod-ci/compose.env --project "$CARE_PREPROD_PROJECT"
+      - run: |
+          python3 deploy/preprod/control.py --env-file .local/preprod-ci/compose.env --project "$CARE_PREPROD_PROJECT" backup .local/preprod-ci/smoke.dump
+          python3 deploy/preprod/control.py --env-file .local/preprod-ci/compose.env --project "$CARE_PREPROD_PROJECT" restore .local/preprod-ci/smoke.dump
+      - if: always()
+        run: |
+          if test -f .local/preprod-ci/compose.env; then
+            docker compose -f compose.preprod.yaml --env-file .local/preprod-ci/compose.env -p "$CARE_PREPROD_PROJECT" down
+          fi

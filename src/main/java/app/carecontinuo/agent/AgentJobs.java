@@ -8,6 +8,8 @@ import app.carecontinuo.identity.Accounts.Actor;
 import app.carecontinuo.notification.Notifications;
 import java.io.IOException;
 import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -45,11 +47,15 @@ class AgentJobs {
     private final JsonMapper json;
     private final Clock clock;
     private final URI endpoint;
+    private final String serviceKey;
+    private final io.micrometer.core.instrument.Counter timeouts;
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
 
     AgentJobs(JdbcClient jdbc, Episodes episodes, Accounts accounts, AuditLog audit, Notifications notices,
               TransactionTemplate transactions, JsonMapper json, Clock clock,
-              @Value("${CARE_AGENT_URL:http://localhost:8000}") String baseUrl) {
+              @Value("${CARE_AGENT_URL:http://localhost:8000}") String baseUrl,
+              @Value("${care.agent.key-file:}") String keyFile, io.micrometer.core.instrument.MeterRegistry metrics)
+            throws IOException {
         this.jdbc = jdbc;
         this.episodes = episodes;
         this.accounts = accounts;
@@ -58,6 +64,9 @@ class AgentJobs {
         this.transactions = transactions;
         this.json = json;
         this.clock = clock;
+        serviceKey = keyFile.isBlank() ? "" : Files.readString(Path.of(keyFile)).strip();
+        if (!keyFile.isBlank() && serviceKey.length() < 32) throw new IllegalStateException("Invalid Agent service key");
+        timeouts = metrics.counter("care.agent.timeouts");
         endpoint = URI.create(baseUrl).resolve("/internal/v1/followup-drafts");
     }
 
@@ -65,7 +74,9 @@ class AgentJobs {
     View create(Actor actor, long episodeId) {
         if (!actor.has("FOLLOWUP")) throw Problems.missing();
         var episode = episodes.lock(episodeId);
-        episodes.authorized(actor, episodeId);
+        var current = accounts.actorById(actor.id());
+        if (!current.has("FOLLOWUP")) throw Problems.missing();
+        episodes.authorized(current, episodeId);
         var currentJob = jdbc.sql(JOB_SQL + " where episode_id = ? and source_version = ? and created_by = ?"
                         + " and status in ('QUEUED', 'RUNNING', 'READY', 'CONFLICT', 'RESOLVED') order by id desc limit 1")
                 .params(episodeId, episode.sourceVersion(), actor.id()).query(Job.class).optional();
@@ -99,7 +110,8 @@ class AgentJobs {
     void resolveConflict(Actor actor, long id, String reason) {
         if (!actor.has("REVIEWER")) throw Problems.missing();
         var episode = episodes.lock(find(id).episodeId());
-        if (!accounts.actorById(actor.id()).has("REVIEWER")
+        var current = accounts.actorById(actor.id());
+        if (!current.has("REVIEWER") || !current.inDepartment(episode.departmentId())
                 || !jdbc.sql("select exists(select 1 from followup_task where episode_id = ? and reviewer_id = ?)")
                 .params(episode.id(), actor.id()).query(Boolean.class).single()) throw Problems.missing();
         int resolved = jdbc.sql("""
@@ -117,18 +129,20 @@ class AgentJobs {
                 update agent_job set status = 'FAILED', failure_code = 'MODEL_INTERRUPTED'
                 where status = 'RUNNING' and expires_at <= clock_timestamp()
                 """).update();
-        var next = jdbc.sql(JOB_SQL + " where status = 'QUEUED' order by id limit 1").query(Job.class).optional();
-        if (next.isEmpty()) return;
-        var job = next.get();
-        var request = transactions.execute(transaction -> claim(job));
-        if (request == null) return;
+        var candidates = jdbc.sql(JOB_SQL + " where status = 'QUEUED' order by id limit 25").query(Job.class).list();
+        for (var job : candidates) {
+            var request = transactions.execute(transaction -> claim(job));
+            if (request == null) continue;
 
-        Outcome outcome = call(request);
-        transactions.executeWithoutResult(transaction -> finish(job, request, outcome));
+            Outcome outcome = call(request);
+            transactions.executeWithoutResult(transaction -> finish(job, request, outcome));
+            return;
+        }
     }
 
     private ExtractionRequest claim(Job pending) {
-        var episode = episodes.lock(pending.episodeId());
+        var episode = episodes.tryLock(pending.episodeId());
+        if (episode == null) return null;
         var job = find(pending.id());
         if (!job.status().equals("QUEUED")) return null;
         if (job.sourceVersion() != episode.sourceVersion() || !stillAuthorized(job)) {
@@ -148,13 +162,15 @@ class AgentJobs {
 
     private Outcome call(ExtractionRequest request) {
         try {
-            var invocation = HttpRequest.newBuilder(endpoint).timeout(Duration.ofSeconds(55))
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(request))).build();
+            var builder = HttpRequest.newBuilder(endpoint).timeout(Duration.ofSeconds(55))
+                    .header("Content-Type", "application/json");
+            if (!serviceKey.isBlank()) builder.header("Authorization", "Bearer " + serviceKey);
+            var invocation = builder.POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(request))).build();
             var response = http.send(invocation, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() != 200) return new Outcome(null, failure(response.body(), response.statusCode()));
             return new Outcome(json.readValue(response.body(), Extraction.class), null);
         } catch (HttpTimeoutException failure) {
+            timeouts.increment();
             return new Outcome(null, "MODEL_TIMEOUT");
         } catch (IOException failure) {
             return new Outcome(null, "AGENT_UNREACHABLE");
@@ -167,7 +183,10 @@ class AgentJobs {
     }
 
     private String failure(String body, int status) {
-        if (status == 504) return "MODEL_TIMEOUT";
+        if (status == 504) {
+            timeouts.increment();
+            return "MODEL_TIMEOUT";
+        }
         String detail = json.readTree(body).path("detail").asString("");
         if (List.of("MODEL_AUTHENTICATION_FAILED", "MODEL_PERMISSION_DENIED", "MODEL_UNAVAILABLE", "MODEL_REQUEST_FAILED",
                 "MODEL_QUOTA_OR_RATE_LIMIT", "MODEL_CONNECTION_FAILED", "MODEL_INVALID_OUTPUT", "MODEL_NO_USABLE_OUTPUT",

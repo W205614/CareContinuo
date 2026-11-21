@@ -3,6 +3,7 @@ package app.carecontinuo.scheduling;
 import app.carecontinuo.common.Problems;
 import app.carecontinuo.followup.RevisitScheduling;
 import app.carecontinuo.followup.RevisitWindow;
+import app.carecontinuo.identity.Accounts;
 import app.carecontinuo.identity.Accounts.Actor;
 import app.carecontinuo.notification.Notifications;
 import java.time.Clock;
@@ -21,7 +22,7 @@ public class Appointments {
             select a.id, a.slot_id, a.supersedes_id, a.status, s.starts_at, s.ends_at,
                    d.display_name as doctor, p.name as department, s.stop_reason, patient.display_name as patient_name
             from appointment a join schedule_slot s on s.id = a.slot_id
-            join doctor d on d.id = s.doctor_id join department p on p.id = d.department_id
+            join doctor d on d.id = s.doctor_id join department p on p.id = s.department_id
             join patient on patient.id = a.patient_id
             """;
     private static final String STORED = "select id, patient_id, slot_id, status from appointment where id = ?";
@@ -29,15 +30,17 @@ public class Appointments {
 
     private final JdbcClient jdbc;
     private final Schedule schedule;
+    private final Accounts accounts;
     private final RevisitScheduling revisits;
     private final Notifications notices;
     private final Clock clock;
     private final TransactionTemplate transactions;
 
     Appointments(JdbcClient jdbc, Schedule schedule, Notifications notices,
-                 Clock clock, TransactionTemplate transactions, RevisitScheduling revisits) {
+                 Clock clock, TransactionTemplate transactions, RevisitScheduling revisits, Accounts accounts) {
         this.jdbc = jdbc;
         this.schedule = schedule;
+        this.accounts = accounts;
         this.revisits = revisits;
         this.notices = notices;
         this.clock = clock;
@@ -50,12 +53,12 @@ public class Appointments {
                     .param(actor.patientId()).query(Appointment.class).list();
         }
         if (actor.has("DOCTOR")) {
-            return jdbc.sql(VIEW + " where d.user_id = ? order by s.starts_at desc, a.id desc limit 100")
-                    .param(actor.id()).query(Appointment.class).list();
+            return Schedule.scoped(jdbc.sql(VIEW + " where d.user_id = :staff and " + Schedule.STAFF_SCOPE
+                    + " order by s.starts_at desc, a.id desc limit 100"), actor).query(Appointment.class).list();
         }
         Schedule.requireOperations(actor);
-        return jdbc.sql(VIEW + " where " + STOP_AFFECTED + " order by s.starts_at desc, a.id desc limit 100")
-                .query(Appointment.class).list();
+        return Schedule.scoped(jdbc.sql(VIEW + " where " + STOP_AFFECTED + " and " + Schedule.STAFF_SCOPE
+                + " order by s.starts_at desc, a.id desc limit 100"), actor).query(Appointment.class).list();
     }
 
     Appointment details(Actor actor, long id) {
@@ -64,6 +67,7 @@ public class Appointments {
         if (actor.has("PATIENT")) requireOwner(actor, stored);
         else if (actor.has("DOCTOR")) requireDoctor(actor, slot);
         else if (actor.has("OPERATIONS")) {
+            Schedule.requireOperations(actor, slot.departmentId());
             return jdbc.sql(VIEW + " where a.id = ? and " + STOP_AFFECTED).param(id)
                     .query(Appointment.class).optional().orElseThrow(Problems::missing);
         } else throw Problems.missing();
@@ -131,7 +135,7 @@ public class Appointments {
     }
 
     private Change reserve(Actor actor, Schedule.Slot slot, Long supersedesId) {
-        if (slot.stoppedAt() != null || !new AppointmentWindow(slot.startsAt()).acceptsBookingChangesAt(now())) {
+        if (!slot.available() || (!actor.demo() && !slot.doctorInDepartment()) || slot.stoppedAt() != null || !new AppointmentWindow(slot.startsAt()).acceptsBookingChangesAt(now())) {
             throw Problems.conflict("该时段已停诊或已过预约截止时间。");
         }
         if (jdbc.sql("""
@@ -156,6 +160,7 @@ public class Appointments {
     void stop(Actor actor, long slotId, String reason) {
         Schedule.requireOperations(actor);
         var slot = schedule.slot(slotId, true);
+        Schedule.requireOperations(accounts.actorById(actor.id()), slot.departmentId());
         if (slot.stoppedAt() != null) return;
         var at = now();
         jdbc.sql("update schedule_slot set stopped_at = ?, stop_reason = ? where id = ?")
@@ -189,7 +194,7 @@ public class Appointments {
     @Transactional
     void start(Actor actor, long id) {
         var slot = schedule.slot(stored(id).slotId(), true);
-        requireDoctor(actor, slot);
+        requireDoctor(accounts.actorById(actor.id()), slot);
         var appointment = stored(id);
         requireState(appointment, "CHECKED_IN");
         jdbc.sql("insert into encounter(appointment_id, doctor_id, started_at) values (?, ?, ?)")
@@ -200,7 +205,7 @@ public class Appointments {
     @Transactional
     void complete(Actor actor, long id, String note, String plan) {
         var slot = schedule.slot(stored(id).slotId(), true);
-        requireDoctor(actor, slot);
+        requireDoctor(accounts.actorById(actor.id()), slot);
         var appointment = stored(id);
         requireState(appointment, "IN_CONSULT");
         jdbc.sql("update encounter set completed_at = ?, note = ?, return_plan = ? where appointment_id = ?")
@@ -211,7 +216,7 @@ public class Appointments {
     @Transactional
     void correct(Actor actor, long id, String reason) {
         var slot = schedule.slot(stored(id).slotId(), true);
-        requireDoctor(actor, slot);
+        requireDoctor(accounts.actorById(actor.id()), slot);
         var appointment = stored(id);
         requireState(appointment, "NO_SHOW");
         if (slot.stoppedAt() != null || !now().isBefore(slot.endsAt())) {
@@ -228,7 +233,10 @@ public class Appointments {
                 """).param(now().minusMinutes(AppointmentWindow.CHECK_IN_WINDOW_MINUTES)).query(Long.class).list();
         for (long slotId : slots) {
             transactions.executeWithoutResult(transaction -> {
-                schedule.slot(slotId, true);
+                boolean claimed = jdbc.sql("""
+                        select id from schedule_slot where id = ? and stopped_at is null for update skip locked
+                        """).param(slotId).query(Long.class).optional().isPresent();
+                if (!claimed) return;
                 var appointments = jdbc.sql("""
                         select id, patient_id, slot_id, status from appointment where slot_id = ? and status = 'BOOKED'
                         """).param(slotId).query(Stored.class).list();
@@ -294,7 +302,7 @@ public class Appointments {
     }
 
     private static void requireDoctor(Actor actor, Schedule.Slot slot) {
-        if (!actor.has("DOCTOR") || slot.doctorUserId() != actor.id()) throw Problems.missing();
+        if (!actor.has("DOCTOR") || slot.doctorUserId() != actor.id() || !actor.inDepartment(slot.departmentId())) throw Problems.missing();
     }
 
     private static void requireState(Stored appointment, String state) {

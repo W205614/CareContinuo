@@ -1,0 +1,43 @@
+spring:
+  config:
+    import: "configtree:/run/secrets/"
+  flyway:
+    enabled: false
+  datasource:
+    hikari:
+      maximum-pool-size: 12
+      minimum-idle: 2
+      connection-timeout: 2000
+server:
+  servlet:
+    session:
+      cookie:
+        secure: true
+        http-only: true
+        same-site: lax
+springdoc:
+  api-docs:
+    enabled: false
+management:
+  server:
+    port: 8081
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  endpoint:
+    health:
+      show-details: never
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,db
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+care:
+  auth:
+    patient-password-only: true
+    required-acr: ${CARE_OIDC_ACR}

@@ -30,14 +30,35 @@ const returnPlan = ref('')
 const newSlot = ref({ doctorId: 0, startsAt: '', endsAt: '', capacity: 1 })
 const newDepartment = ref('')
 const newDoctor = ref({ username: '', displayName: '', departmentId: 0 })
-const usableSlots = computed(() => schedule.value.slots.filter((slot) => slot.remaining > 0 && !slot.stoppedAt))
+const slotDepartment = ref(0)
+const slotFrom = ref('')
+const slotTo = ref('')
+const nextSlot = ref<number | null>(null)
+const usableSlots = computed(() => schedule.value.slots.filter((slot) => slot.remaining > 0 && !slot.stoppedAt && slot.available && (props.actor.demo || slot.doctorInDepartment)))
 
 async function refresh() {
   const [newSchedule, appointments] = await Promise.all([api<Schedule>('/schedule'), api<Appointment[]>('/appointments')])
   schedule.value = newSchedule
+  if (!props.actor.demo) await loadSlots()
   records.value = appointments
   newSlot.value.doctorId ||= newSchedule.doctors[0]?.id ?? 0
   newDoctor.value.departmentId ||= newSchedule.departments[0]?.id ?? 0
+}
+
+async function loadSlots(afterId?: number) {
+  const query = new URLSearchParams()
+  if (slotDepartment.value) query.set('departmentId', String(slotDepartment.value))
+  if (slotFrom.value) query.set('from', fromShanghaiInput(slotFrom.value))
+  if (slotTo.value) query.set('to', fromShanghaiInput(slotTo.value))
+  if (afterId) query.set('afterId', String(afterId))
+  const page = await api<{ slots: Schedule['slots']; nextCursor: number | null }>('/schedule-slots?' + query)
+  schedule.value.slots = afterId ? [...schedule.value.slots, ...page.slots] : page.slots
+  nextSlot.value = page.nextCursor
+}
+
+async function filterSlots(afterId?: number) {
+  error.value = ''
+  try { await loadSlots(afterId) } catch (failure) { error.value = (failure as Error).message }
 }
 
 async function run(action: () => Promise<unknown>, done: string) {
@@ -107,6 +128,16 @@ watch(() => props.refreshVersion, refreshWithFeedback)
   <div class="workspace-section">
     <p v-if="error" role="alert" class="error">{{ error }}</p>
     <p v-if="status" role="status">{{ status }}</p>
+    <form v-if="!actor.demo && (patient || operations)" class="panel field-grid" @submit.prevent="filterSlots()">
+      <label>排班科室<select v-model.number="slotDepartment">
+        <option :value="0">全部科室</option>
+        <option v-for="item in schedule.departments" :key="item.id" :value="item.id">{{ item.name }}</option>
+      </select></label>
+      <label>起始日期时间<input v-model="slotFrom" type="datetime-local" /></label>
+      <label>结束日期时间<input v-model="slotTo" type="datetime-local" /></label>
+      <button type="submit">筛选排班</button>
+      <button v-if="nextSlot" class="secondary" type="button" @click="filterSlots(nextSlot!)">载入更多排班</button>
+    </form>
     <section v-if="operations" class="panel" aria-labelledby="manage-title">
       <h2 id="manage-title">排班与放号</h2>
       <form class="field-grid" @submit.prevent="submitSlot">
@@ -116,7 +147,7 @@ watch(() => props.refreshVersion, refreshWithFeedback)
         <label>号源数量<input v-model.number="newSlot.capacity" min="1" max="1000" type="number" required /></label>
         <button :disabled="busy">开放号源</button>
       </form>
-      <details>
+      <details v-if="actor.demo">
         <summary>维护科室与医生</summary>
         <form class="field-grid" @submit.prevent="run(() => mutate('/departments', { name: newDepartment }), '科室已保存。')">
           <label>科室名称<input v-model.trim="newDepartment" maxlength="100" required /></label>

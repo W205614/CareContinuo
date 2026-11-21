@@ -5,6 +5,10 @@ spring:
     url: ${CARE_DB_URL:jdbc:postgresql://localhost:5432/carecontinuo}
     username: ${CARE_DB_USER:carecontinuo}
     password: ${CARE_DB_PASSWORD:}
+  session:
+    jdbc:
+      initialize-schema: never
+    timeout: 30m
   mvc:
     problemdetails:
       enabled: true
@@ -14,6 +18,7 @@ spring:
       max-request-size: 6MB
 server:
   port: 8080
+  shutdown: graceful
   servlet:
     session:
       cookie:

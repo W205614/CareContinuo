@@ -157,13 +157,15 @@ test('AC-06 failed station delivery reaches the owner and manual retry delivers 
   }
   runSql('update app_user set enabled = false where id = ' + ownerId)
   try {
-    expect((await get(owner, '/work-items')).status()).toBe(404)
-    expect((await post(owner, retryPath)).status()).toBe(404)
+    expect((await get(owner, '/work-items')).status()).toBe(401)
+    expect((await post(owner, retryPath)).status()).toBe(401)
   } finally {
     runSql('update app_user set enabled = true where id = ' + ownerId)
   }
-  expect((await action(owner, id, 'TRANSFER', 1, { newOwnerId: secondOwner, note: '更换随访负责人' })).status()).toBe(204)
-  expect((await post(owner, retryPath)).status()).toBe(404)
+  expect((await get(owner, '/work-items')).status()).toBe(401)
+  const resumed = await signedIn('followup')
+  expect((await action(resumed, id, 'TRANSFER', 1, { newOwnerId: secondOwner, note: '更换随访负责人' })).status()).toBe(204)
+  expect((await post(resumed, retryPath)).status()).toBe(404)
   expect((await post(replacement, retryPath)).status()).toBe(204)
   await expect.poll(async () => (await (await get(patient, '/inbox')).json()).filter(
     (item: { kind: string; objectId: number }) => item.kind === 'FOLLOWUP_PUBLISHED' && item.objectId === id,
