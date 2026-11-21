@@ -1,0 +1,25 @@
+spring:
+  application:
+    name: carecontinuo
+  datasource:
+    url: ${CARE_DB_URL:jdbc:postgresql://localhost:5432/carecontinuo}
+    username: ${CARE_DB_USER:carecontinuo}
+    password: ${CARE_DB_PASSWORD:}
+  mvc:
+    problemdetails:
+      enabled: true
+  servlet:
+    multipart:
+      max-file-size: 5MB
+      max-request-size: 6MB
+server:
+  port: 8080
+  servlet:
+    session:
+      cookie:
+        http-only: true
+        same-site: lax
+springdoc:
+  api-docs:
+    path: /api/v1/openapi
+  paths-to-match: /api/v1/**
