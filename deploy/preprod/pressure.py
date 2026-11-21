@@ -117,13 +117,13 @@ def main():
     start = psql(compose, "select clock_timestamp();")
     print(f"Load start {start}, {args.clients} authenticated patients, {args.rate} requests/s", flush=True)
     script = Path(__file__).with_name("load.js").resolve()
-    docker("run", "--rm", "--network", args.project + "_browser", "--user", "0:0",
+    load = docker("run", "--rm", "--network", args.project + "_browser", "--user", "0:0",
            "--mount", f"type=bind,source={directory / 'load.json'},target=/load.json,readonly",
            "--mount", f"type=bind,source={reports},target=/evidence",
            "--mount", f"type=bind,source={script},target=/test.js,readonly",
            "-e", f"CARE_LOAD_RPS={args.rate}", "-e", f"CARE_LOAD_DURATION={args.duration}",
            "-e", f"CARE_LOAD_REPORT=/evidence/{args.report}",
-           "grafana/k6:2.4.0", "run", "--quiet", "--insecure-skip-tls-verify", "/test.js")
+           "grafana/k6:2.4.0", "run", "--quiet", "--insecure-skip-tls-verify", "/test.js", check=False)
     report = psql(compose, """
         select json_build_object('delivered', count(*), 'p95Seconds',
           percentile_cont(0.95) within group (order by extract(epoch from (m.created_at - e.available_at))))
@@ -133,6 +133,8 @@ def main():
     delivery = json.loads(report)
     (reports / (Path(args.report).stem + "-delivery.json")).write_text(report, encoding="utf-8")
     print("Notification delivery " + report)
+    if load.returncode != 0:
+        raise SystemExit(load.returncode)
     if delivery["delivered"] == 0 or delivery["p95Seconds"] > 10:
         raise SystemExit("Notification delivery threshold not met")
 

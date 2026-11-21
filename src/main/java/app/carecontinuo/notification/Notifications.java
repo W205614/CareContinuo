@@ -20,10 +20,10 @@ public class Notifications {
     private static final List<Integer> RETRY_MINUTES = List.of(1, 5, 15);
     private static final String INBOX_SQL = """
             select m.id, e.kind, e.object_id, e.title, m.created_at, m.read_at, m.corrected_at,
-              (select max(new_m.id) from inbox_message new_m join outbox_event new_e on new_m.event_id = new_e.id
+              case when e.episode_id is not null then (select max(new_m.id) from inbox_message new_m join outbox_event new_e on new_m.event_id = new_e.id
                where new_e.kind = 'FOLLOWUP_CORRECTION' and new_e.object_id = e.object_id
                and new_e.episode_id = e.episode_id and new_e.revision_id > e.revision_id
-               and new_m.recipient_user_id = m.recipient_user_id and new_m.corrected_at is null) as replacement_id
+               and new_m.recipient_user_id = m.recipient_user_id and new_m.corrected_at is null) end as replacement_id
             from inbox_message m join outbox_event e on e.id = m.event_id where m.recipient_user_id = ?
             """;
 

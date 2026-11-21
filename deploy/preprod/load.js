@@ -12,17 +12,18 @@ const failures = new Rate('care_unexpected_errors')
 const conflicts = new Counter('care_conflicts')
 const successes = new Counter('care_successes')
 const clients = fixture.sessions.length
+const rate = Number(__ENV.CARE_LOAD_RPS || 100)
 const appointments = new Map()
 
 export const options = {
   scenarios: {
     mixed: {
       executor: 'constant-arrival-rate',
-      rate: Number(__ENV.CARE_LOAD_RPS || 100),
+      rate,
       timeUnit: '1s',
       duration: __ENV.CARE_LOAD_DURATION || '30m',
-      preAllocatedVUs: Math.min(clients, 100),
-      maxVUs: clients,
+      preAllocatedVUs: Math.max(clients, rate * 3),
+      maxVUs: Math.max(clients, rate * 6),
     },
   },
   thresholds: {

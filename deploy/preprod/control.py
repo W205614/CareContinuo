@@ -11,8 +11,8 @@ from pathlib import Path
 from secrets import token_hex
 
 
-def docker(*args, **options):
-    return subprocess.run(["docker", *args], check=True, **options)
+def docker(*args, check=True, **options):
+    return subprocess.run(["docker", *args], check=check, **options)
 
 
 def compose_command(env_file, project):
