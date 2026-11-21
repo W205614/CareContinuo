@@ -2,7 +2,7 @@
 
 ## 开始前
 
-阅读[首版需求](CareContinuo-首版需求文档.md)和[开发交接](AGENTS.md)，先说明目标、涉及角色和验收编号。环境需要 Java 21、Python 3.13、Node.js 24 和 Docker Compose。所有复现资料使用合成数据。
+阅读[需求文档](CareContinuo-需求文档.md)和[开发交接](AGENTS.md)，先说明目标、涉及角色和验收编号。环境需要 Java 21、Python 3.13、Node.js 24 和 Docker Compose。所有复现资料使用合成数据。
 
 ## 测试
 
