@@ -74,7 +74,7 @@ public class Notifications {
     void poll() {
         var ids = jdbc.sql("""
                 select id from outbox_event e where state = 'PENDING' and available_at <= ? and not
-                """ + BLOCKED_BY_CONFLICT + " order by available_at, id limit 25")
+                """ + BLOCKED_BY_CONFLICT + " order by available_at, id limit 100")
                 .param(OffsetDateTime.now(clock)).query(Long.class).list();
         for (long id : ids) {
             try {
