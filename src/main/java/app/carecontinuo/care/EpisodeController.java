@@ -52,7 +52,7 @@ class EpisodeController {
     @ResponseStatus(HttpStatus.CREATED)
     Map<String, Long> add(Principal principal, @Valid @RequestBody Discharge input) {
         return Map.of("id", episodes.registerDischarge(accounts.actor(principal), input.patientId(),
-                input.reference().strip(), input.careDate()));
+                input.reference().strip(), input.careDate(), input.departmentId()));
     }
 
     @PostMapping("/appointments/{id}/return-plan")
@@ -96,7 +96,7 @@ class EpisodeController {
     }
 
     record Discharge(@Positive long patientId, @NotBlank @Size(max = 100) String reference,
-                     @NotNull LocalDate careDate) { }
+                     @NotNull LocalDate careDate, @Positive Long departmentId) { }
     record Assignment(@Positive long ownerId) { }
     record Text(@Positive Long documentId, @NotBlank @Size(max = 200) String title,
                 @NotBlank @Size(max = 80000) String text) { }

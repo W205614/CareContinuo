@@ -49,7 +49,7 @@ class Revisits {
                        dep.id as department_id, dep.name as department, v.id as encounter_id, v.completed_at
                 from followup_appointment r join appointment a on a.id = r.appointment_id
                 join schedule_slot s on s.id = a.slot_id join doctor d on d.id = s.doctor_id
-                join department dep on dep.id = d.department_id left join encounter v on v.appointment_id = a.id
+                join department dep on dep.id = s.department_id left join encounter v on v.appointment_id = a.id
                 where r.task_id = ? order by a.id desc limit 100
                 """).param(taskId).query(Visit.class).list().stream().map(row -> {
                     boolean needsReschedule = window != null && List.of("BOOKED", "STOPPED").contains(row.status())

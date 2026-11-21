@@ -11,7 +11,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
-@Profile("demo")
+@Profile("demo & !preprod")
 @Component
 @Order(10)
 class DemoAccounts implements ApplicationRunner {

@@ -1,0 +1,75 @@
+"""Scan the tracked source snapshot and the three locally built application images."""
+import argparse
+import json
+import subprocess
+import tarfile
+from pathlib import Path
+
+from control import docker
+
+
+def scan(command, name, directory):
+    report = directory / (name + ".json")
+    repository = Path.home() / ".m2" / "repository"
+    mounts = ["--mount", f"type=bind,source={directory},target=/reports"]
+    if command[0] == "fs":
+        if not repository.is_dir():
+            raise RuntimeError("Run Maven verify before scanning repository dependencies")
+        mounts += ["--mount", f"type=bind,source={repository},target=/root/.m2/repository,readonly"]
+    docker("run", "--rm", "-v", "carecontinuo-trivy-cache:/root/.cache/trivy", *mounts,
+           "aquasec/trivy:0.72.0", *command, "--offline-scan",
+           "--format", "json", "--output", "/reports/" + report.name)
+    data = json.loads(report.read_text(encoding="utf-8"))
+    counts = {"unknown": 0, "low": 0, "medium": 0, "high": 0, "critical": 0, "secrets": 0}
+    for result in data.get("Results", []):
+        for vulnerability in result.get("Vulnerabilities") or []:
+            counts[vulnerability["Severity"].lower()] += 1
+        counts["secrets"] += len(result.get("Secrets") or [])
+    print(name, counts, flush=True)
+    return counts["high"] + counts["critical"] + counts["secrets"]
+
+
+def scan_api(archive, directory):
+    report_path = directory / "api.cdx.json"
+    docker("run", "--rm", "--mount", f"type=bind,source={directory},target=/reports",
+           "anchore/syft:v1.57.2", "scan", "docker-archive:/reports/" + archive.name,
+           "-o", "cyclonedx-json=/reports/" + report_path.name)
+    inventory = json.loads(report_path.read_text(encoding="utf-8"))
+    libraries = [item for item in inventory.get("components", []) if item.get("purl", "").startswith("pkg:maven/")]
+    if not any(item["name"] == "spring-webmvc" for item in libraries):
+        raise RuntimeError("The image inventory must include the packaged Java libraries")
+    print(f"Packaged Java components: {len(libraries)}", flush=True)
+    findings = scan(["image", "--scanners", "vuln,secret", "--pkg-types", "os",
+                     "--input", "/reports/" + archive.name], "api-platform", directory)
+    return findings + scan(["sbom", "--scanners", "vuln", "--pkg-types", "library",
+                            "/reports/" + report_path.name], "api-libraries", directory)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("directory", type=Path)
+    args = parser.parse_args()
+    directory = args.directory.resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    source = directory / "source"
+    source.mkdir()
+    archive = directory / "source.tar"
+    subprocess.run(["git", "archive", "--format=tar", "-o", str(archive), "HEAD"], check=True)
+    with tarfile.open(archive) as staged:
+        staged.extractall(source, filter="data")
+    findings = scan(["fs", "--scanners", "vuln,secret", "/reports/source"], "repository", directory)
+    for service in ("api", "web", "agent"):
+        image = "carecontinuo-preprod-" + service + ":local"
+        archive = directory / (service + ".tar")
+        docker("image", "save", "-o", str(archive), image)
+        if service == "api":
+            findings += scan_api(archive, directory)
+        else:
+            findings += scan(["image", "--scanners", "vuln,secret", "--input", "/reports/" + archive.name],
+                             service, directory)
+    if findings:
+        raise SystemExit(f"{findings} high/critical or secret findings require triage")
+
+
+if __name__ == "__main__":
+    main()

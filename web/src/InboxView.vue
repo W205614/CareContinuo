@@ -10,13 +10,18 @@ const patient = props.actor.roles.includes('PATIENT')
 const messages = ref<Message[]>([])
 const work = ref<Work[]>([])
 const selected = ref<Message>()
+const departments = ref<{ id: number; name: string }[]>([])
+const department = ref(0)
+const state = ref('')
+const cursor = ref<number | null>(null)
 const error = ref('')
 const kinds: Record<string, string> = { STOPPED_APPOINTMENT: '停诊预约', NOTIFICATION_FAILED: '通知发送失败', SOURCE_CHANGED: '更新随访草稿', FOLLOWUP_REVIEW: '审核随访', FOLLOWUP_OVERDUE: '随访逾期', PATIENT_FEEDBACK: '患者反馈', FOLLOWUP_TRANSFER: '接手随访', AGENT_CONFLICT: '核实 AI 发现的资料冲突' }
 
 async function refresh() {
   try {
     if (patient) messages.value = await api<Message[]>('/inbox')
-    else work.value = await api<Work[]>('/work-items')
+    else if (props.actor.demo) work.value = await api<Work[]>('/work-items')
+    else await loadWork()
   } catch (failure) {
     error.value = (failure as Error).message
   }
@@ -37,7 +42,30 @@ async function retry(id: number) {
   catch (failure) { error.value = (failure as Error).message }
 }
 
-onMounted(refresh)
+async function loadWork(afterId?: number) {
+  error.value = ''
+  try {
+    const query = new URLSearchParams()
+    if (department.value) query.set('departmentId', String(department.value))
+    if (state.value) query.set('state', state.value)
+    if (afterId) query.set('afterId', String(afterId))
+    const payload = await api<{ work: Work[]; nextCursor: number | null }>('/work-items/page?' + query)
+    work.value = afterId ? [...work.value, ...payload.work] : payload.work
+    cursor.value = payload.nextCursor
+  } catch (failure) {
+    error.value = (failure as Error).message
+  }
+}
+
+onMounted(async () => {
+  await refresh()
+  if (!patient && !props.actor.demo && props.actor.departmentIds.length) {
+    try {
+      const result = await api<{ departments: { id: number; name: string }[] }>('/schedule')
+      departments.value = result.departments.filter((row) => props.actor.departmentIds.includes(row.id))
+    } catch (failure) { error.value = (failure as Error).message }
+  }
+})
 </script>
 
 <template>
@@ -58,6 +86,14 @@ onMounted(refresh)
       </ul>
     </template>
     <template v-else>
+      <form v-if="!actor.demo && departments.length" class="field-grid" @submit.prevent="loadWork()">
+        <label>待办科室<select v-model.number="department">
+          <option :value="0">全部科室</option>
+          <option v-for="item in departments" :key="item.id" :value="item.id">{{ item.name }}</option>
+        </select></label>
+        <label>状态<select v-model="state"><option value="">全部状态</option><option value="OPEN">待处理</option><option value="DONE">已处理</option></select></label>
+        <button type="submit">筛选待办</button>
+      </form>
       <p v-if="!work.length">暂无待办。</p>
       <ul class="record-list">
         <li v-for="item in work" :key="item.id" class="record">
@@ -65,6 +101,7 @@ onMounted(refresh)
           <button v-if="item.status === 'OPEN' && item.kind === 'NOTIFICATION_FAILED'" class="secondary" type="button" @click="retry(item.id)">补发消息</button>
         </li>
       </ul>
+      <button v-if="cursor" class="secondary" type="button" @click="loadWork(cursor!)">载入更多待办</button>
     </template>
   </section>
 </template>

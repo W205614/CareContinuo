@@ -1,13 +1,21 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { login } from './api'
+import { api, login } from './api'
 
 const router = useRouter()
 const username = ref('')
 const password = ref('')
-const failure = ref('')
+const failure = ref(new URLSearchParams(location.search).has('staff-login') ? '工作人员登录未获授权。' : '')
 const busy = ref(false)
+const staffLogin = ref(false)
+onMounted(async () => {
+  try {
+    staffLogin.value = (await api<{ staffLogin: boolean }>('/session/options')).staffLogin
+  } catch (error) {
+    failure.value = (error as Error).message
+  }
+})
 
 async function submit() {
   failure.value = ''
@@ -37,7 +45,9 @@ async function submit() {
     <section class="credentials" aria-labelledby="login-heading">
       <form class="sign-in-form" @submit.prevent="submit">
         <h2 id="login-heading">登录</h2>
-        <p>请使用本地演示账号。</p>
+        <a v-if="staffLogin" class="staff-login" href="/oauth2/authorization/hospital">工作人员统一登录</a>
+        <p v-if="staffLogin">合成患者使用下方账号登录。</p>
+        <p v-else>请使用本地演示账号。</p>
         <label for="username">账号</label>
         <input id="username" v-model.trim="username" autocomplete="username" required />
         <label for="password">密码</label>

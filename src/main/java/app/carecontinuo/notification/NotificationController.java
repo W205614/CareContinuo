@@ -8,6 +8,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -41,6 +42,13 @@ class NotificationController {
     @GetMapping("/work-items")
     List<Notifications.Work> work(Principal principal) {
         return notifications.work(accounts.actor(principal));
+    }
+
+    @GetMapping("/work-items/page")
+    Notifications.WorkPage workPage(Principal principal, @RequestParam(required = false) Long departmentId,
+                                     @RequestParam(required = false) String state,
+                                     @RequestParam(required = false) Long afterId) {
+        return notifications.workPage(accounts.actor(principal), departmentId, state, afterId);
     }
 
     @PostMapping("/work-items/{id}/retry")

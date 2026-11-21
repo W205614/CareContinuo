@@ -20,10 +20,10 @@ public class Notifications {
     private static final List<Integer> RETRY_MINUTES = List.of(1, 5, 15);
     private static final String INBOX_SQL = """
             select m.id, e.kind, e.object_id, e.title, m.created_at, m.read_at, m.corrected_at,
-              (select max(new_m.id) from inbox_message new_m join outbox_event new_e on new_m.event_id = new_e.id
+              case when e.episode_id is not null then (select max(new_m.id) from inbox_message new_m join outbox_event new_e on new_m.event_id = new_e.id
                where new_e.kind = 'FOLLOWUP_CORRECTION' and new_e.object_id = e.object_id
                and new_e.episode_id = e.episode_id and new_e.revision_id > e.revision_id
-               and new_m.recipient_user_id = m.recipient_user_id and new_m.corrected_at is null) as replacement_id
+               and new_m.recipient_user_id = m.recipient_user_id and new_m.corrected_at is null) end as replacement_id
             from inbox_message m join outbox_event e on e.id = m.event_id where m.recipient_user_id = ?
             """;
 
@@ -36,6 +36,8 @@ public class Notifications {
 
     private static final String CAN_ACCESS_WORK = """
             (w.owner_id = :actor or (w.owner_id is null and w.role = 'OPERATIONS'))
+            and (:demo or exists(select 1 from work_item_department scope join staff_department sd
+                on sd.department_id = scope.department_id where scope.id = w.id and sd.user_id = :actor))
             and exists(select 1 from app_user u join user_role r on r.user_id = u.id
               where u.id = :actor and u.enabled and r.role = w.role)
             """;
@@ -72,7 +74,7 @@ public class Notifications {
     void poll() {
         var ids = jdbc.sql("""
                 select id from outbox_event e where state = 'PENDING' and available_at <= ? and not
-                """ + BLOCKED_BY_CONFLICT + " order by available_at, id limit 25")
+                """ + BLOCKED_BY_CONFLICT + " order by available_at, id limit 100")
                 .param(OffsetDateTime.now(clock)).query(Long.class).list();
         for (long id : ids) {
             try {
@@ -85,7 +87,7 @@ public class Notifications {
     }
 
     private void deliver(long id) {
-        lockEpisode(id);
+        if (!tryLockEpisode(id)) return;
         var event = pending(id);
         if (event == null || event.blockedByConflict()) return;
         if (event.episodeId() != null && !dispatchable(event)) {
@@ -102,7 +104,7 @@ public class Notifications {
     }
 
     private void recordFailure(long id) {
-        lockEpisode(id);
+        if (!tryLockEpisode(id)) return;
         var event = pending(id);
         if (event == null || event.blockedByConflict()) return;
         int attempts = event.attempts();
@@ -120,6 +122,14 @@ public class Notifications {
                     .param(event.objectId()).query(Long.class).single();
             openWork("NOTIFICATION_FAILED", id, "FOLLOWUP", owner, now);
         }
+    }
+
+    private boolean tryLockEpisode(long eventId) {
+        return jdbc.sql("""
+                select o.episode_id is null or exists (
+                    select 1 from care_episode e where e.id = o.episode_id for update of e skip locked)
+                from outbox_event o where o.id = ?
+                """).param(eventId).query(Boolean.class).optional().orElse(false);
     }
 
     // Document correction and message publication hold the same episode lock before touching events.
@@ -144,7 +154,7 @@ public class Notifications {
                 select recipient_user_id, attempts, episode_id, object_id, revision_id, kind,
                 """ + BLOCKED_BY_CONFLICT + """
                   as blocked_by_conflict from outbox_event e
-                where id = ? and state = 'PENDING' and available_at <= ? for update of e
+                where id = ? and state = 'PENDING' and available_at <= ? for update of e skip locked
                 """).params(id, OffsetDateTime.now(clock)).query(Pending.class).optional().orElse(null);
     }
 
@@ -183,15 +193,33 @@ public class Notifications {
         return jdbc.sql("""
                 select id, kind, object_id, status, due_at, resolution from work_item w where
                 """ + CAN_ACCESS_WORK + " order by (status = 'OPEN') desc, due_at, id limit 100")
-                .param("actor", actor.id()).query(Work.class).list();
+                .param("actor", actor.id()).param("demo", actor.demo()).query(Work.class).list();
     }
+
+    WorkPage workPage(Actor actor, Long departmentId, String state, Long afterId) {
+        if (state != null && !List.of("OPEN", "DONE").contains(state)) throw Problems.invalid("任务状态无效。");
+        var rows = jdbc.sql("""
+                select w.id, w.kind, w.object_id, w.status, w.due_at, w.resolution
+                from work_item w join work_item_department scope on scope.id = w.id
+                where
+                """ + CAN_ACCESS_WORK + """
+                and (cast(:department as bigint) is null or scope.department_id = :department)
+                and (cast(:state as text) is null or w.status = :state)
+                and w.id > :cursor order by w.id limit 51
+                """).param("actor", actor.id()).param("demo", actor.demo())
+                .param("department", departmentId).param("state", state).param("cursor", afterId == null ? 0L : afterId)
+                .query(Work.class).list();
+        return new WorkPage(rows.stream().limit(50).toList(), rows.size() > 50 ? rows.get(49).id() : null);
+    }
+
+    record WorkPage(List<Work> work, Long nextCursor) { }
 
     @Transactional
     void retry(Actor actor, long id) {
         long eventId = jdbc.sql("""
                 select w.object_id from work_item w where w.id = :id
                 and w.kind = 'NOTIFICATION_FAILED' and w.status = 'OPEN' and
-                """ + CAN_ACCESS_WORK).param("id", id).param("actor", actor.id()).query(Long.class)
+                """ + CAN_ACCESS_WORK).param("id", id).param("actor", actor.id()).param("demo", actor.demo()).query(Long.class)
                 .optional().orElseThrow(Problems::missing);
         lockEpisode(eventId);
         int matched = jdbc.sql("""
@@ -199,7 +227,7 @@ public class Notifications {
                 from work_item w where w.id = :id and w.kind = 'NOTIFICATION_FAILED' and w.status = 'OPEN'
                 and w.object_id = e.id and e.id = :event and e.state = 'FAILED' and
                 """ + CAN_ACCESS_WORK).param("now", OffsetDateTime.now(clock)).param("id", id)
-                .param("event", eventId).param("actor", actor.id()).update();
+                .param("event", eventId).param("actor", actor.id()).param("demo", actor.demo()).update();
         if (matched == 0) throw Problems.missing();
     }
 

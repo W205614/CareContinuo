@@ -13,7 +13,7 @@ const followup = props.actor.roles.includes('FOLLOWUP')
 const reviewer = props.actor.roles.includes('REVIEWER')
 const episodes = ref<CareEpisode[]>([])
 const tasks = ref<Followup[]>([])
-const directory = ref<Directory>({ patients: [], reviewers: [], owners: [] })
+const directory = ref<Directory>({ patients: [], reviewers: [], owners: [], departments: [] })
 const departments = ref<Schedule['departments']>([])
 const episodeId = ref(0)
 const documents = ref<DocumentVersion[]>([])
@@ -23,7 +23,7 @@ const editing = ref<number>()
 const error = ref('')
 const notice = ref('')
 const busy = ref(false)
-const discharge = ref({ patientId: 0, reference: '', careDate: '' })
+const discharge = ref({ patientId: 0, departmentId: 0, reference: '', careDate: '' })
 const doc = ref({ documentId: 0, title: '', text: '' })
 const selectedFile = ref<File>()
 const fileKey = ref(0)
@@ -53,6 +53,7 @@ async function refresh() {
     if (schedule) departments.value = schedule.departments
     draft.value.reviewerId ||= choices.reviewers[0]?.id ?? 0
     discharge.value.patientId ||= choices.patients[0]?.id ?? 0
+    discharge.value.departmentId ||= choices.departments[0]?.id ?? 0
   }
 }
 
@@ -214,6 +215,7 @@ watch(() => props.refreshVersion, () => { if (detail.value) void showTask(detail
         <summary>登记合成出院记录</summary>
         <form class="field-grid" @submit.prevent="addEpisode">
           <label>患者<select v-model.number="discharge.patientId" required><option v-for="item in directory.patients" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
+          <label>资料科室<select v-model.number="discharge.departmentId" required><option v-for="item in directory.departments" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
           <label>出院记录编号<input v-model.trim="discharge.reference" maxlength="100" required /></label>
           <label>出院日期<input v-model="discharge.careDate" type="date" required /></label>
           <button :disabled="busy">登记出院记录</button>

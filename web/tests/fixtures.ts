@@ -63,8 +63,8 @@ export function runSql(sql: string) {
 export function seedBookedAppointment(minutesFromStart: number) {
   return Number(runSql(`
     with slot as (
-      insert into schedule_slot(doctor_id, starts_at, ends_at, capacity, remaining)
-      select d.id, now() + interval '${minutesFromStart} minutes',
+      insert into schedule_slot(doctor_id, department_id, starts_at, ends_at, capacity, remaining)
+      select d.id, d.department_id, now() + interval '${minutesFromStart} minutes',
              now() + interval '${minutesFromStart + 60} minutes', 1, 0
       from doctor d join app_user u on u.id = d.user_id where u.username = 'doctor' returning id
     )

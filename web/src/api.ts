@@ -6,6 +6,8 @@ export interface Actor {
   displayName: string
   patientId: number | null
   roles: string[]
+  departmentIds: number[]
+  demo: boolean
 }
 
 export class ApiError extends Error {

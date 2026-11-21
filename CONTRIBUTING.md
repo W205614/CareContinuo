@@ -4,6 +4,17 @@
 
 阅读[需求文档](CareContinuo-需求文档.md)和[开发交接](AGENTS.md)，先说明目标、涉及角色和验收编号。环境需要 Java 21、Python 3.13、Node.js 24 和 Docker Compose。所有复现资料使用合成数据。
 
+## 宿主源码开发
+
+使用独立的本机 PostgreSQL 数据库，例如 `carecontinuo_dev`。为 Java 进程设置
+`CARE_DB_URL=jdbc:postgresql://localhost:5432/carecontinuo_dev`、`CARE_DB_USER`、`CARE_DB_PASSWORD`
+和 `SPRING_PROFILES_ACTIVE=demo`。在根目录执行 `./mvnw spring-boot:run`，Windows 用
+`./mvnw.cmd spring-boot:run`。Flyway 初始化该库，API 监听 8080。
+
+在 `agent` 执行 `uv run --locked uvicorn app.main:app --port 8000`。在 `web` 执行
+`npm ci` 及 `npm run dev`，使用 Vite 输出的本机地址。Vite 将 `/api` 转给 8080。没有模型密钥时可走人工随访。
+使用 macOS/Linux 的 `export` 或 Windows PowerShell 的 `$env:` 为各进程配置环境。开发库、演示库和预生产库应分别使用。
+
 ## 测试
 
 - 项目根目录执行 `./mvnw -B verify`，Windows 使用 `./mvnw.cmd -B verify`。
@@ -22,6 +33,8 @@ Pop-Location
 ```
 
 Playwright 启动时要求两个目标均显式配置，并根据容器标签和端口核验 Web 与 PostgreSQL 属于同一测试项目。CI 执行相同检查。测试使用模型替身和合成数据库。真实 GPT 验收单独记录模型、引用定位和错误状态，仓库中的配置示例只保留路径和变量名。
+
+预生产验收使用独立 TLS、OIDC 测试身份和 PostgreSQL 卷，运行 [AC-10～14 用例与压测](docs/预生产部署与验收.md)。新增 Flyway 迁移需通过空库与 V7 样本升级，工作人员权限修改需验证已有会话失效。
 
 ## 提交约定
 

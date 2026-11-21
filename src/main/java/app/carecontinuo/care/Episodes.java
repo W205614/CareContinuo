@@ -2,6 +2,7 @@ package app.carecontinuo.care;
 
 import app.carecontinuo.audit.AuditLog;
 import app.carecontinuo.common.Problems;
+import app.carecontinuo.identity.Accounts;
 import app.carecontinuo.identity.Accounts.Actor;
 import app.carecontinuo.notification.Notifications;
 import java.io.IOException;
@@ -20,11 +21,13 @@ import org.springframework.web.multipart.MultipartFile;
 public class Episodes {
     private static final String INFO = """
             select e.id, e.patient_id, p.display_name as patient, e.owner_id, e.kind, e.reference,
-                   e.care_date, e.source_version
+                   e.care_date, e.source_version, e.department_id
             from care_episode e join patient p on p.id = e.patient_id
             """;
     private static final String CAN_SEE = """
-            (e.owner_id = :actor and :followup or exists (select 1 from followup_task t where t.episode_id = e.id
+            (:demo or exists(select 1 from staff_department sd
+                where sd.user_id = :actor and sd.department_id = e.department_id))
+            and (e.owner_id = :actor and :followup or exists (select 1 from followup_task t where t.episode_id = e.id
             and (t.owner_id = :actor and :followup or t.reviewer_id = :actor and :reviewer))
             or (:doctor and exists (select 1 from encounter visit join doctor d on d.id = visit.doctor_id
             where visit.id = e.encounter_id and d.user_id = :actor)))
@@ -34,12 +37,14 @@ public class Episodes {
     private final AuditLog audit;
     private final Notifications notices;
     private final Clock clock;
+    private final Accounts accounts;
 
-    Episodes(JdbcClient jdbc, AuditLog audit, Notifications notices, Clock clock) {
+    Episodes(JdbcClient jdbc, AuditLog audit, Notifications notices, Clock clock, Accounts accounts) {
         this.jdbc = jdbc;
         this.audit = audit;
         this.notices = notices;
         this.clock = clock;
+        this.accounts = accounts;
     }
 
     public List<Episode> list(Actor actor) {
@@ -59,32 +64,42 @@ public class Episodes {
                 .optional().orElseThrow(Problems::missing);
     }
 
-    public Directory directory(Actor actor) {
-        requireClinical(actor);
-        var patients = actor.has("FOLLOWUP")
-                ? jdbc.sql("select id, display_name as name from patient order by id limit 100").query(Choice.class).list()
-                : List.<Choice>of();
-        var reviewers = accountChoices("REVIEWER");
-        var owners = accountChoices("FOLLOWUP");
-        return new Directory(patients, reviewers, owners);
+    public Episode tryLock(long id) {
+        return jdbc.sql(INFO + " where e.id = ? for update of e skip locked")
+                .param(id).query(Episode.class).optional().orElse(null);
     }
 
-    public void requireAccountRole(long id, String role) {
-        boolean recognized = jdbc.sql("""
-                select exists(select 1 from app_user u join user_role r on r.user_id = u.id
-                where u.id = ? and u.enabled and r.role = ?)
-                """).params(id, role).query(Boolean.class).single();
-        if (!recognized) throw Problems.invalid("该账号不具备所需的业务权限。");
+    public Directory directory(Actor actor) {
+        requireClinical(actor);
+        var patients = actor.has("FOLLOWUP") && (actor.demo() || !actor.departmentIds().isEmpty())
+                ? jdbc.sql("select id, display_name as name from patient order by id limit 100").query(Choice.class).list()
+                : List.<Choice>of();
+        var reviewers = accountChoices(actor, "REVIEWER");
+        var owners = accountChoices(actor, "FOLLOWUP");
+        var departments = jdbc.sql("""
+                select id, name from department d where enabled and (:demo or exists(
+                    select 1 from staff_department sd where sd.user_id = :staff and sd.department_id = d.id))
+                order by name
+                """).param("demo", actor.demo()).param("staff", actor.id()).query(Choice.class).list();
+        return new Directory(patients, reviewers, owners, departments);
     }
 
     @Transactional
-    public long registerDischarge(Actor actor, long patientId, String reference, LocalDate dischargeDate) {
-        if (!actor.has("FOLLOWUP")) throw Problems.forbidden();
+    public long registerDischarge(Actor actor, long patientId, String reference, LocalDate dischargeDate,
+                                  Long selectedDepartment) {
+        Actor current = accounts.actorById(actor.id());
+        if (!current.has("FOLLOWUP")) throw Problems.forbidden();
+        if (selectedDepartment == null && !current.demo()) throw Problems.invalid("请选择本科室出院资料。");
+        long departmentId = jdbc.sql("""
+                select id from department where enabled and
+                ((cast(:department as bigint) is null and name = '全科门诊') or id = :department)
+                """).param("department", selectedDepartment).query(Long.class).optional().orElseThrow(Problems::missing);
+        if (!current.inDepartment(departmentId)) throw Problems.missing();
         try {
             long id = jdbc.sql("""
-                    insert into care_episode(patient_id, owner_id, kind, reference, care_date)
-                    select id, ?, 'DISCHARGE', ?, ? from patient where id = ? returning id
-                    """).params(actor.id(), reference, dischargeDate, patientId).query(Long.class)
+                    insert into care_episode(patient_id, owner_id, kind, reference, care_date, department_id)
+                    select id, ?, 'DISCHARGE', ?, ?, ? from patient where id = ? returning id
+                    """).params(actor.id(), reference, dischargeDate, departmentId, patientId).query(Long.class)
                     .optional().orElseThrow(Problems::missing);
             audit.record(actor.id(), "EPISODE", id, "REGISTER_DISCHARGE");
             return id;
@@ -97,21 +112,26 @@ public class Episodes {
     public long registerOutpatient(Actor actor, long appointmentId, long ownerId) {
         if (!actor.has("DOCTOR")) throw Problems.missing();
         var completed = jdbc.sql("""
-                select v.id, a.patient_id, v.return_plan, (v.completed_at at time zone 'Asia/Shanghai')::date as care_date
+                select v.id, a.patient_id, v.return_plan, s.department_id,
+                    (v.completed_at at time zone 'Asia/Shanghai')::date as care_date
                 from encounter v join appointment a on a.id = v.appointment_id join doctor d on d.id = v.doctor_id
+                join schedule_slot s on s.id = a.slot_id
                 where a.id = ? and d.user_id = ? and v.completed_at is not null for update of v
                 """).params(appointmentId, actor.id()).query(CompletedVisit.class).optional().orElseThrow(Problems::missing);
+        var current = accounts.actorById(actor.id());
+        if (!current.has("DOCTOR") || !current.inDepartment(completed.departmentId())) throw Problems.missing();
         var existing = jdbc.sql("select id from care_episode where encounter_id = ?")
                 .param(completed.id()).query(Long.class).optional();
         if (existing.isPresent()) return existing.get();
         if (completed.returnPlan() == null || completed.returnPlan().isBlank()) {
             throw Problems.conflict("请先在接诊记录中填写复诊安排。");
         }
-        requireAccountRole(ownerId, "FOLLOWUP");
+        accounts.requireStaffRole(ownerId, "FOLLOWUP", completed.departmentId());
         long id = jdbc.sql("""
-                insert into care_episode(patient_id, owner_id, encounter_id, kind, reference, care_date)
-                values (?, ?, ?, 'OUTPATIENT', ?, ?) returning id
-                """).params(completed.patientId(), ownerId, completed.id(), "OP-" + appointmentId, completed.careDate())
+                insert into care_episode(patient_id, owner_id, encounter_id, kind, reference, care_date, department_id)
+                values (?, ?, ?, 'OUTPATIENT', ?, ?, ?) returning id
+                """).params(completed.patientId(), ownerId, completed.id(), "OP-" + appointmentId,
+                        completed.careDate(), completed.departmentId())
                 .query(Long.class).single();
         store(actor, id, null, "门诊复诊安排", DocumentText.extract("outpatient-return.txt",
                 completed.returnPlan().getBytes(StandardCharsets.UTF_8)));
@@ -173,7 +193,9 @@ public class Episodes {
     private void requireEditor(Actor actor, long id) {
         if (!actor.has("FOLLOWUP")) throw Problems.forbidden();
         lock(id);
-        authorized(actor, id);
+        var current = accounts.actorById(actor.id());
+        if (!current.has("FOLLOWUP")) throw Problems.forbidden();
+        authorized(current, id);
     }
 
     private long store(Actor actor, long episodeId, Long documentId, String title, DocumentText.Extracted extracted) {
@@ -232,15 +254,18 @@ public class Episodes {
         }
     }
 
-    private List<Choice> accountChoices(String role) {
+    private List<Choice> accountChoices(Actor actor, String role) {
         return jdbc.sql("""
                 select u.id, u.display_name as name from app_user u join user_role r on r.user_id = u.id
-                where r.role = ? and u.enabled order by u.display_name, u.id
-                """).param(role).query(Choice.class).list();
+                where r.role = :role and u.enabled and (:demo or exists (
+                    select 1 from staff_department candidate join staff_department own
+                    on candidate.department_id = own.department_id where candidate.user_id = u.id and own.user_id = :staff))
+                order by u.display_name, u.id
+                """).param("role", role).param("demo", actor.demo()).param("staff", actor.id()).query(Choice.class).list();
     }
 
     private JdbcClient.StatementSpec entitled(String sql, Actor actor) {
-        return jdbc.sql(sql).param("actor", actor.id()).param("followup", actor.has("FOLLOWUP"))
+        return jdbc.sql(sql).param("actor", actor.id()).param("demo", actor.demo()).param("followup", actor.has("FOLLOWUP"))
                 .param("reviewer", actor.has("REVIEWER")).param("doctor", actor.has("DOCTOR"));
     }
 
@@ -249,14 +274,14 @@ public class Episodes {
     }
 
     public record Episode(long id, long patientId, String patient, long ownerId, String kind, String reference,
-                          LocalDate careDate, int sourceVersion) { }
+                          LocalDate careDate, int sourceVersion, long departmentId) { }
     public record Choice(long id, String name) { }
-    public record Directory(List<Choice> patients, List<Choice> reviewers, List<Choice> owners) { }
+    public record Directory(List<Choice> patients, List<Choice> reviewers, List<Choice> owners, List<Choice> departments) { }
     public record Segment(long id, String title, long versionId, int versionNumber, Integer pageNumber,
                           int lineNumber, String excerpt) { }
     public record Document(long id, String title, long versionId, int versionNumber, String filename,
                            OffsetDateTime createdAt) { }
     public record Attachment(String filename, String mediaType, byte[] content) { }
     private record Invalidated(long id, long ownerId) { }
-    private record CompletedVisit(long id, long patientId, String returnPlan, LocalDate careDate) { }
+    private record CompletedVisit(long id, long patientId, String returnPlan, LocalDate careDate, long departmentId) { }
 }

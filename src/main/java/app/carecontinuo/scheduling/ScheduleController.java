@@ -7,6 +7,7 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.Size;
 import java.security.Principal;
+import java.time.OffsetDateTime;
 import java.util.List;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -15,6 +16,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -35,6 +37,14 @@ class ScheduleController {
     @GetMapping("/schedule")
     Schedule.Overview catalog(Principal principal) {
         return schedule.catalog(accounts.actor(principal));
+    }
+
+    @GetMapping("/schedule-slots")
+    Schedule.SlotPage page(Principal principal, @RequestParam(required = false) @Positive Long departmentId,
+                           @RequestParam(required = false) OffsetDateTime from,
+                           @RequestParam(required = false) OffsetDateTime to,
+                           @RequestParam(required = false) @Positive Long afterId) {
+        return schedule.page(accounts.actor(principal), departmentId, from, to, afterId);
     }
 
     @PostMapping("/departments")

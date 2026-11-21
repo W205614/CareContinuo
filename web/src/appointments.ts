@@ -1,4 +1,4 @@
-export interface Slot { id: number; doctorName: string; department: string; departmentId: number; startsAt: string; endsAt: string; remaining: number; stoppedAt: string | null; stopReason: string | null }
+export interface Slot { id: number; doctorName: string; department: string; departmentId: number; startsAt: string; endsAt: string; remaining: number; available: boolean; doctorInDepartment: boolean; stoppedAt: string | null; stopReason: string | null }
 export interface Schedule { departments: { id: number; name: string }[]; doctors: { id: number; displayName: string }[]; slots: Slot[] }
 
 export const appointmentStates: Record<string, string> = {

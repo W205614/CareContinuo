@@ -5,11 +5,12 @@ import { actor, logout } from './api'
 import SchedulingView from './SchedulingView.vue'
 import InboxView from './InboxView.vue'
 import FollowupView from './FollowupView.vue'
+import AdminView from './AdminView.vue'
 
 const router = useRouter()
 const appointmentChange = ref(0)
 const followupChange = ref(0)
-const roleNames: Record<string, string> = { PATIENT: '患者', DOCTOR: '接诊医生', FOLLOWUP: '随访人员', OPERATIONS: '运营', REVIEWER: '审核员' }
+const roleNames: Record<string, string> = { PATIENT: '患者', DOCTOR: '接诊医生', FOLLOWUP: '随访人员', OPERATIONS: '运营', REVIEWER: '审核员', ADMIN: '管理员' }
 
 async function signOut() {
   await logout()
@@ -25,6 +26,7 @@ async function signOut() {
     </div>
     <SchedulingView v-if="actor.roles.some((role) => ['PATIENT', 'DOCTOR', 'OPERATIONS'].includes(role))" :actor="actor" :refresh-version="followupChange" @changed="appointmentChange++" />
     <FollowupView v-if="actor.roles.some((role) => ['PATIENT', 'FOLLOWUP', 'REVIEWER'].includes(role))" :actor="actor" :refresh-version="appointmentChange" @booked="followupChange++" />
+    <AdminView v-if="actor.roles.includes('ADMIN')" />
     <InboxView :actor="actor" />
   </main>
 </template>
