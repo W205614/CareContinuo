@@ -18,7 +18,7 @@ import org.springframework.stereotype.Service;
 class Schedule {
     static final String SLOT_VIEW = """
             select s.id, s.doctor_id, d.display_name as doctor_name, p.name as department,
-                   d.user_id as doctor_user_id, s.starts_at, s.ends_at, s.capacity,
+                   d.user_id as doctor_user_id, p.id as department_id, s.starts_at, s.ends_at, s.capacity,
                    s.remaining, s.stopped_at, s.stop_reason
             from schedule_slot s join doctor d on s.doctor_id = d.id join department p on d.department_id = p.id
             """;
@@ -98,7 +98,7 @@ class Schedule {
 
     record Department(long id, String name) { }
     record Doctor(long id, long departmentId, String displayName) { }
-    record Slot(long id, long doctorId, String doctorName, String department, long doctorUserId,
+    record Slot(long id, long doctorId, String doctorName, String department, long doctorUserId, long departmentId,
                 OffsetDateTime startsAt, OffsetDateTime endsAt, int capacity, int remaining,
                 OffsetDateTime stoppedAt, String stopReason) { }
     record Overview(List<Department> departments, List<Doctor> doctors, List<Slot> slots) { }

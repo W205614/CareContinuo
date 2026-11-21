@@ -3,7 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { api, mutate, type Actor } from './api'
 import { appointmentStates, type Schedule, type Slot } from './appointments'
 import { feedbackKinds, followupStates, type CareEpisode, type Directory, type DocumentVersion, type Followup, type Revisit, type Source } from './followup'
-import { fromShanghaiInput, shanghaiTime } from './time'
+import { fromShanghaiInput, shanghaiDate, shanghaiTime } from './time'
 import AgentSuggestions, { type Candidate } from './AgentSuggestions.vue'
 
 const props = defineProps<{ actor: Actor; refreshVersion: number }>()
@@ -14,6 +14,7 @@ const reviewer = props.actor.roles.includes('REVIEWER')
 const episodes = ref<CareEpisode[]>([])
 const tasks = ref<Followup[]>([])
 const directory = ref<Directory>({ patients: [], reviewers: [], owners: [] })
+const departments = ref<Schedule['departments']>([])
 const episodeId = ref(0)
 const documents = ref<DocumentVersion[]>([])
 const sources = ref<Source[]>([])
@@ -29,7 +30,7 @@ const fileKey = ref(0)
 const visits = ref<Revisit[]>([])
 const slots = ref<Slot[]>([])
 const revisitSlot = ref(0)
-const draft = ref({ reviewerId: 0, kind: 'REVISIT', title: '', instructions: '', dueAt: '', segmentIds: [] as number[], manualReference: '' })
+const draft = ref({ reviewerId: 0, kind: 'REVISIT', title: '', instructions: '', dueAt: '', revisitFrom: '', revisitTo: '', revisitDepartmentId: 0, segmentIds: [] as number[], manualReference: '' })
 const action = ref({ name: '', note: '', newOwnerId: 0, closureReason: 'UNREACHABLE', encounterId: 0 })
 const currentDocuments = computed(() => documents.value.filter((row, index, rows) => rows.findIndex((item) => item.id === row.id) === index))
 const active = computed(() => !!detail.value && ['DISPATCHED', 'PATIENT_REPLIED'].includes(detail.value.status))
@@ -43,9 +44,13 @@ const allowRevisit = computed(() => patient && active.value && !visits.value.som
 async function refresh() {
   tasks.value = await api<Followup[]>('/followups')
   if (!patient) {
-    const [rows, choices] = await Promise.all([api<CareEpisode[]>('/episodes'), api<Directory>('/care-directory')])
+    const [rows, choices, schedule] = await Promise.all([
+      api<CareEpisode[]>('/episodes'), api<Directory>('/care-directory'),
+      followup ? api<Schedule>('/schedule') : null,
+    ])
     episodes.value = rows
     directory.value = choices
+    if (schedule) departments.value = schedule.departments
     draft.value.reviewerId ||= choices.reviewers[0]?.id ?? 0
     discharge.value.patientId ||= choices.patients[0]?.id ?? 0
   }
@@ -110,7 +115,12 @@ async function showTask(id: number) {
     detail.value = current
     visits.value = current.kind === 'REVISIT' ? await api<Revisit[]>(`/followups/${id}/appointments`) : []
     slots.value = current.kind === 'REVISIT' && allowRevisit.value
-      ? (await api<Schedule>('/schedule')).slots.filter((item) => !item.stoppedAt && item.remaining > 0) : []
+      ? (await api<Schedule>('/schedule')).slots.filter((item) => {
+        if (item.stoppedAt || item.remaining <= 0) return false
+        if (!current.revisitDepartmentId) return true
+        const date = shanghaiDate(item.startsAt)
+        return item.departmentId === current.revisitDepartmentId && date >= current.revisitFrom! && date <= current.revisitTo!
+      }) : []
     revisitSlot.value = slots.value[0]?.id ?? 0
   }
   catch (failure) { error.value = (failure as Error).message }
@@ -122,15 +132,21 @@ async function edit(item: Followup) {
   const shanghaiDate = new Date(new Date(item.dueAt).getTime() + 8 * 3_600_000)
   draft.value = { reviewerId: item.reviewerId, kind: item.kind, title: item.title,
     instructions: item.instructions ?? '', dueAt: shanghaiDate.toISOString().slice(0, 16),
+    revisitFrom: item.revisitFrom ?? '', revisitTo: item.revisitTo ?? '',
+    revisitDepartmentId: item.revisitDepartmentId ?? 0,
     segmentIds: item.sources.map((source) => source.id).filter((id) => sources.value.some((source) => source.id === id)),
     manualReference: item.manualReference ?? '' }
 }
 
 function saveDraft() {
   return run(async () => {
+    const isRevisit = draft.value.kind === 'REVISIT'
     const data = { kind: draft.value.kind, title: draft.value.title, instructions: draft.value.instructions,
       dueAt: fromShanghaiInput(draft.value.dueAt), segmentIds: draft.value.segmentIds,
-      manualReference: draft.value.manualReference || null }
+      manualReference: draft.value.manualReference || null,
+      revisitFrom: isRevisit ? draft.value.revisitFrom : null,
+      revisitTo: isRevisit ? draft.value.revisitTo : null,
+      revisitDepartmentId: isRevisit ? draft.value.revisitDepartmentId : null }
     if (editing.value && detail.value) {
       await mutate(`/followups/${editing.value}/draft`, { version: detail.value.version, draft: data })
       await showTask(editing.value)
@@ -143,13 +159,20 @@ function saveDraft() {
     draft.value.instructions = ''
     draft.value.manualReference = ''
     draft.value.segmentIds = []
+    draft.value.revisitFrom = ''
+    draft.value.revisitTo = ''
+    draft.value.revisitDepartmentId = 0
   }, '草稿已保存。')
 }
 
 function adopt(candidate: Candidate) {
   const previous = draft.value
+  const isRevisit = candidate.kind === 'REVISIT'
   draft.value = { reviewerId: previous.reviewerId, kind: candidate.kind, title: candidate.title,
-    instructions: candidate.instructions, dueAt: candidate.dueDate ? `${candidate.dueDate}T17:00` : '',
+    instructions: candidate.instructions,
+    dueAt: !isRevisit && candidate.dueDate ? candidate.dueDate + 'T17:00' : '',
+    revisitFrom: isRevisit ? candidate.dueDate ?? '' : '', revisitTo: isRevisit ? candidate.dueDate ?? '' : '',
+    revisitDepartmentId: 0,
     segmentIds: [...new Set(candidate.references.map((item) => item.segmentId))], manualReference: '' }
 }
 
@@ -216,6 +239,11 @@ watch(() => props.refreshVersion, () => { if (detail.value) void showTask(detail
             <label v-if="!editing">审核医生<select v-model.number="draft.reviewerId" required><option v-for="item in directory.reviewers" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
             <label>随访类型<select v-model="draft.kind"><option value="REVISIT">复诊</option><option value="PENDING_RESULT">待出检查结果</option></select></label>
             <label>事项标题<input v-model.trim="draft.title" maxlength="140" required /></label>
+            <template v-if="draft.kind === 'REVISIT'">
+              <label>复诊科室<select v-model.number="draft.revisitDepartmentId" required><option :value="0" disabled>选择科室</option><option v-for="item in departments" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
+              <label>复诊开始日期<input v-model="draft.revisitFrom" type="date" required /></label>
+              <label>复诊结束日期<input v-model="draft.revisitTo" type="date" :min="draft.revisitFrom" required /></label>
+            </template>
             <label>完成期限（北京时间）<input v-model="draft.dueAt" type="datetime-local" required /></label>
             <label>安排内容<textarea v-model.trim="draft.instructions" maxlength="4000" required /></label>
             <label>手工记录依据<textarea v-model.trim="draft.manualReference" maxlength="600" /></label>
@@ -236,6 +264,11 @@ watch(() => props.refreshVersion, () => { if (detail.value) void showTask(detail
       <h3>{{ detail.title }}</h3>
       <p>{{ followupStates[detail.status] }} · 完成期限 {{ shanghaiTime(detail.dueAt) }}</p>
       <p v-if="detail.needsReview">资料已更正，等待医护确认。</p>
+      <p v-if="detail.revisitFrom && (!patient || !detail.needsReview)">
+        复诊安排 · {{ detail.revisitDepartment }} · {{ detail.revisitFrom }}<template v-if="detail.revisitFrom !== detail.revisitTo"> 至 {{ detail.revisitTo }}</template>
+      </p>
+      <AgentSuggestions v-if="canReview" :episode-id="detail.episodeId"
+        :source-version="episodes.find((item) => item.id === detail?.episodeId)?.sourceVersion ?? 0" review-only />
       <p v-if="detail.instructions" class="preserve-lines">{{ detail.instructions }}</p>
       <p v-if="detail.manualReference">手工依据 · {{ detail.manualReference }}</p>
       <ul v-if="detail.sources.length" class="source-list"><li v-for="item in detail.sources" :key="item.id"><a :href="`/api/v1/episodes/${detail.episodeId}/versions/${item.versionId}/download`">{{ item.title }} · 版本 {{ item.versionNumber }}</a><span v-if="item.pageNumber"> · 第 {{ item.pageNumber }} 页</span> · 第 {{ item.lineNumber }} 行 · {{ item.excerpt }}</li></ul>
@@ -249,6 +282,9 @@ watch(() => props.refreshVersion, () => { if (detail.value) void showTask(detail
             <div><strong>{{ appointmentStates[item.status] }} · {{ shanghaiTime(item.startsAt) }}</strong><div>{{ item.department }} · {{ item.doctor }}</div><div v-if="item.completedAt">接诊完成 · {{ shanghaiTime(item.completedAt) }}</div></div>
           </li>
         </ul>
+        <p v-if="patient && !detail.needsReview && visits.some((item) => item.needsReschedule)">
+          已有预约与更正后的复诊安排不符。请到“我的预约”改约或取消。
+        </p>
         <p v-if="patient && visits.some((item) => item.status === 'STOPPED')">请从“我的预约”处理停诊记录并重新选号。</p>
         <form v-if="allowRevisit && slots.length" class="field-grid" @submit.prevent="bookRevisit(detail.id)">
           <label>复诊时段<select v-model.number="revisitSlot" required><option v-for="item in slots" :key="item.id" :value="item.id">{{ shanghaiTime(item.startsAt) }} · {{ item.department }} · {{ item.doctorName }}</option></select></label>

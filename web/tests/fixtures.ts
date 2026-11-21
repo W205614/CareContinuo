@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { expect, request as playwright, type APIRequestContext, type Page } from '@playwright/test'
 
-const webUrl = process.env.CARE_WEB_URL ?? 'http://127.0.0.1:18080'
+const webUrl = process.env.CARE_WEB_URL!
 
 export async function signedIn(username: string) {
   const context = await playwright.newContext({ baseURL: webUrl })
@@ -54,7 +54,7 @@ export async function loginInBrowser(page: Page, username: string) {
 }
 
 export function runSql(sql: string) {
-  const name = process.env.CARE_E2E_DB_CONTAINER ?? `${process.env.COMPOSE_PROJECT_NAME ?? 'carecontinuo'}-postgres-1`
+  const name = process.env.CARE_E2E_DB_CONTAINER!
   return execFileSync('docker', ['exec', '-i', name, 'psql', '-XqAt', '-v', 'ON_ERROR_STOP=1', '-U', 'carecontinuo', '-d', 'carecontinuo'], {
     input: sql, encoding: 'utf8',
   }).trim()

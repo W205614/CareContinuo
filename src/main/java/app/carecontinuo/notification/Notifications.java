@@ -11,6 +11,7 @@ import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
 @Component
@@ -24,6 +25,19 @@ public class Notifications {
                and new_e.episode_id = e.episode_id and new_e.revision_id > e.revision_id
                and new_m.recipient_user_id = m.recipient_user_id and new_m.corrected_at is null) as replacement_id
             from inbox_message m join outbox_event e on e.id = m.event_id where m.recipient_user_id = ?
+            """;
+
+    private static final String BLOCKED_BY_CONFLICT = """
+            exists(select 1 from care_episode ep join agent_job j on j.episode_id = ep.id
+              join followup_revision r on r.source_version = ep.source_version
+              where ep.id = e.episode_id and r.id = e.revision_id
+                and j.source_version = ep.source_version and j.status = 'CONFLICT')
+            """;
+
+    private static final String CAN_ACCESS_WORK = """
+            (w.owner_id = :actor or (w.owner_id is null and w.role = 'OPERATIONS'))
+            and exists(select 1 from app_user u join user_role r on r.user_id = u.id
+              where u.id = :actor and u.enabled and r.role = w.role)
             """;
 
     private final JdbcClient jdbc;
@@ -57,9 +71,9 @@ public class Notifications {
     @Scheduled(fixedDelayString = "${care.notifications.poll-ms:2000}")
     void poll() {
         var ids = jdbc.sql("""
-                select id from outbox_event where state = 'PENDING' and available_at <= ?
-                order by available_at, id limit 25
-                """).param(OffsetDateTime.now(clock)).query(Long.class).list();
+                select id from outbox_event e where state = 'PENDING' and available_at <= ? and not
+                """ + BLOCKED_BY_CONFLICT + " order by available_at, id limit 25")
+                .param(OffsetDateTime.now(clock)).query(Long.class).list();
         for (long id : ids) {
             try {
                 transactions.executeWithoutResult(status -> deliver(id));
@@ -73,7 +87,7 @@ public class Notifications {
     private void deliver(long id) {
         lockEpisode(id);
         var event = pending(id);
-        if (event == null) return;
+        if (event == null || event.blockedByConflict()) return;
         if (event.episodeId() != null && !dispatchable(event)) {
             jdbc.sql("update outbox_event set state = 'STALE' where id = ?").param(id).update();
             closeWork("NOTIFICATION_FAILED", id, null, "当前版本不再适用此提醒");
@@ -90,7 +104,7 @@ public class Notifications {
     private void recordFailure(long id) {
         lockEpisode(id);
         var event = pending(id);
-        if (event == null) return;
+        if (event == null || event.blockedByConflict()) return;
         int attempts = event.attempts();
         var now = OffsetDateTime.now(clock);
         if (attempts < RETRY_MINUTES.size()) {
@@ -118,18 +132,19 @@ public class Notifications {
     private boolean dispatchable(Pending event) {
         return jdbc.sql("""
                 select exists(select 1 from followup_task t join care_episode e on e.id = t.episode_id
-                  where t.id = ? and t.published_revision_id = ? and not t.needs_review
+                  join followup_revision r on r.id = t.published_revision_id and r.source_version = e.source_version
+                  where t.id = ? and r.id = ? and not t.needs_review
                     and (t.status in ('DISPATCHED', 'PATIENT_REPLIED')
-                    or (? <> 'FOLLOWUP_DUE' and t.status in ('VERIFIED', 'CLOSED')))
-                    and not exists(select 1 from agent_job j where j.episode_id = e.id
-                      and j.source_version = e.source_version and j.status = 'CONFLICT'))
+                    or (? <> 'FOLLOWUP_DUE' and t.status in ('VERIFIED', 'CLOSED'))))
                 """).params(event.objectId(), event.revisionId(), event.kind()).query(Boolean.class).single();
     }
 
     private Pending pending(long id) {
         return jdbc.sql("""
-                select recipient_user_id, attempts, episode_id, object_id, revision_id, kind from outbox_event
-                where id = ? and state = 'PENDING' and available_at <= ? for update
+                select recipient_user_id, attempts, episode_id, object_id, revision_id, kind,
+                """ + BLOCKED_BY_CONFLICT + """
+                  as blocked_by_conflict from outbox_event e
+                where id = ? and state = 'PENDING' and available_at <= ? for update of e
                 """).params(id, OffsetDateTime.now(clock)).query(Pending.class).optional().orElse(null);
     }
 
@@ -166,23 +181,30 @@ public class Notifications {
 
     List<Work> work(Actor actor) {
         return jdbc.sql("""
-                select id, kind, object_id, status, due_at, resolution from work_item
-                where owner_id = ? or (owner_id is null and role = 'OPERATIONS' and ?)
-                order by (status = 'OPEN') desc, due_at, id limit 100
-                """).params(actor.id(), actor.has("OPERATIONS")).query(Work.class).list();
+                select id, kind, object_id, status, due_at, resolution from work_item w where
+                """ + CAN_ACCESS_WORK + " order by (status = 'OPEN') desc, due_at, id limit 100")
+                .param("actor", actor.id()).query(Work.class).list();
     }
 
+    @Transactional
     void retry(Actor actor, long id) {
+        long eventId = jdbc.sql("""
+                select w.object_id from work_item w where w.id = :id
+                and w.kind = 'NOTIFICATION_FAILED' and w.status = 'OPEN' and
+                """ + CAN_ACCESS_WORK).param("id", id).param("actor", actor.id()).query(Long.class)
+                .optional().orElseThrow(Problems::missing);
+        lockEpisode(eventId);
         int matched = jdbc.sql("""
-                update outbox_event e set state = 'PENDING', attempts = 0, available_at = ?
-                from work_item w where w.id = ? and w.kind = 'NOTIFICATION_FAILED' and w.status = 'OPEN'
-                and w.object_id = e.id and e.state = 'FAILED'
-                and (w.owner_id = ? or (w.owner_id is null and w.role = 'OPERATIONS' and ?))
-                """).params(OffsetDateTime.now(clock), id, actor.id(), actor.has("OPERATIONS")).update();
+                update outbox_event e set state = 'PENDING', attempts = 0, available_at = :now
+                from work_item w where w.id = :id and w.kind = 'NOTIFICATION_FAILED' and w.status = 'OPEN'
+                and w.object_id = e.id and e.id = :event and e.state = 'FAILED' and
+                """ + CAN_ACCESS_WORK).param("now", OffsetDateTime.now(clock)).param("id", id)
+                .param("event", eventId).param("actor", actor.id()).update();
         if (matched == 0) throw Problems.missing();
     }
 
-    private record Pending(long recipientUserId, int attempts, Long episodeId, long objectId, Long revisionId, String kind) { }
+    private record Pending(long recipientUserId, int attempts, Long episodeId, long objectId, Long revisionId,
+                           String kind, boolean blockedByConflict) { }
     record Message(long id, String kind, long objectId, String title, OffsetDateTime createdAt, OffsetDateTime readAt,
                    OffsetDateTime correctedAt, Long replacementId) { }
     record Work(long id, String kind, long objectId, String status, OffsetDateTime dueAt, String resolution) { }

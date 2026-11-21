@@ -10,6 +10,7 @@ import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.Size;
 import java.time.Clock;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.HashSet;
 import java.util.List;
@@ -27,8 +28,17 @@ public class Followups {
             from followup_task t join care_episode e on e.id = t.episode_id join patient p on p.id = e.patient_id
             """;
     private static final String REVISION_SQL = """
-            select id, version_number, source_version, task_kind, title, instructions, due_at, manual_reference
+            select id, version_number, source_version, task_kind, title, instructions, due_at, manual_reference,
+              revisit_from, revisit_to, revisit_department_id,
+              (select d.name from department d where d.id = followup_revision.revisit_department_id) as revisit_department
             from followup_revision where task_id = ?
+            """;
+
+    private static final String OVERDUE = """
+            t.status in ('DISPATCHED', 'PATIENT_REPLIED') and not t.needs_review
+            and exists(select 1 from followup_revision r where r.id = t.published_revision_id and r.due_at <= ?)
+            and not exists(select 1 from work_item w
+              where w.kind = 'FOLLOWUP_OVERDUE' and w.object_id = t.id and w.status = 'OPEN')
             """;
 
     private final JdbcClient jdbc;
@@ -67,17 +77,21 @@ public class Followups {
         return view(actor, task, true);
     }
 
-    public void requireReadAccess(Actor actor, long id) {
-        authorize(actor, load(id));
+    RevisitWindow publishedRevisitWindow(Actor actor, long id) {
+        var task = load(id);
+        authorize(actor, task);
+        return task.publishedRevisionId() == null ? null : publishedRevision(task).revisitWindow();
     }
 
-    public void requireRevisitBooking(Actor actor, long id) {
+    RevisitWindow requireRevisitBooking(Actor actor, long id) {
         if (!actor.has("PATIENT")) throw Problems.missing();
         episodes.lock(load(id).episodeId());
         var task = load(id);
         authorize(actor, task);
         requirePublished(task);
-        if (!revision(task).taskKind().equals("REVISIT")) throw Problems.conflict("此随访事项无需预约复诊。");
+        var published = publishedRevision(task);
+        if (!published.taskKind().equals("REVISIT")) throw Problems.conflict("此随访事项无需预约复诊。");
+        return published.revisitWindow();
     }
 
     @Transactional
@@ -110,6 +124,17 @@ public class Followups {
 
     private void saveRevision(Actor actor, long id, int version, Episodes.Episode episode, Draft draft) {
         if (!draft.dueAt().isAfter(OffsetDateTime.now(clock))) throw Problems.invalid("完成期限应在未来。");
+        if (draft.kind() == Kind.REVISIT) {
+            if (draft.revisitFrom() == null || draft.revisitTo() == null || draft.revisitDepartmentId() == null
+                    || draft.revisitFrom().isAfter(draft.revisitTo())) {
+                throw Problems.invalid("请选择复诊科室和有效日期区间，单日可将起止日期设为同一天。");
+            }
+            boolean departmentExists = jdbc.sql("select exists(select 1 from department where id = ?)")
+                    .param(draft.revisitDepartmentId()).query(Boolean.class).single();
+            if (!departmentExists) throw Problems.invalid("所选复诊科室不存在。");
+        } else if (draft.revisitFrom() != null || draft.revisitTo() != null || draft.revisitDepartmentId() != null) {
+            throw Problems.invalid("只有复诊随访可以设置复诊日期和科室。");
+        }
         var ids = new HashSet<>(draft.segmentIds());
         if (ids.isEmpty() && (draft.manualReference() == null || draft.manualReference().isBlank())) {
             throw Problems.invalid("请至少标记一处资料出处，或填写手工记录的依据。");
@@ -120,10 +145,11 @@ public class Followups {
         }
         long revisionId = jdbc.sql("""
                 insert into followup_revision(task_id, version_number, source_version, task_kind, title,
-                    instructions, due_at, manual_reference, author_id)
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?) returning id
+                    instructions, due_at, manual_reference, author_id, revisit_from, revisit_to, revisit_department_id)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) returning id
                 """).param(id).param(version).param(episode.sourceVersion()).param(draft.kind().name()).param(draft.title().strip())
                 .param(draft.instructions().strip()).param(draft.dueAt()).param(draft.manualReference()).param(actor.id())
+                .param(draft.revisitFrom()).param(draft.revisitTo()).param(draft.revisitDepartmentId())
                 .query(Long.class).single();
         for (long segmentId : ids) {
             jdbc.sql("insert into followup_revision_source(revision_id, segment_id) values (?, ?)")
@@ -147,6 +173,7 @@ public class Followups {
             case SUBMIT -> {
                 requireOwner(actor, task);
                 requireStatus(task, "DRAFT");
+                requireRevisitWindow(revision);
                 transition(task, "IN_REVIEW");
                 notices.openWork("FOLLOWUP_REVIEW", task.id(), "REVIEWER", task.reviewerId(), revision.dueAt());
             }
@@ -198,10 +225,11 @@ public class Followups {
     private void dispatch(Actor actor, Task task, Revision revision) {
         requireReviewer(actor, task);
         requireStatus(task, "APPROVED");
+        requireRevisitWindow(revision);
         if (jdbc.sql("""
                 select exists(select 1 from agent_job where episode_id = ? and source_version = ? and status = 'CONFLICT')
                 """).params(task.episodeId(), revision.sourceVersion()).query(Boolean.class).single()) {
-            throw Problems.conflict("当前资料仍有冲突。请核实原文、更正资料并重新审核后派发。");
+            throw Problems.conflict("当前资料仍有冲突。资料有误时请更正并重新审核，模型误报由审核医生核实后解除。");
         }
         var now = OffsetDateTime.now(clock);
         if (!revision.dueAt().isAfter(now)) throw Problems.conflict("随访期限已过，请更新草稿和期限后重新审核。");
@@ -242,20 +270,14 @@ public class Followups {
     @Scheduled(fixedDelayString = "${care.followup.poll-ms:5000}")
     void overdue() {
         var at = OffsetDateTime.now(clock);
-        var ids = jdbc.sql(TASK_SQL + """
-                where t.status in ('DISPATCHED', 'PATIENT_REPLIED')
-                and exists(select 1 from followup_revision r where r.id = t.published_revision_id and r.due_at <= ?)
-                and not exists(select 1 from work_item w where w.kind = 'FOLLOWUP_OVERDUE' and w.object_id = t.id)
-                order by t.id limit 50
-                """).param(at).query(Task.class).list();
-        for (var entry : ids) {
+        var overdue = jdbc.sql(TASK_SQL + " where " + OVERDUE + " order by t.id limit 50")
+                .param(at).query(Task.class).list();
+        for (var entry : overdue) {
             transactions.executeWithoutResult(status -> {
                 episodes.lock(entry.episodeId());
-                var task = load(entry.id());
-                if ((task.status().equals("DISPATCHED") || task.status().equals("PATIENT_REPLIED"))
-                        && !revision(task).dueAt().isAfter(at)) {
-                    notices.openWork("FOLLOWUP_OVERDUE", task.id(), "FOLLOWUP", task.ownerId(), at);
-                }
+                jdbc.sql(TASK_SQL + " where t.id = ? and " + OVERDUE).params(entry.id(), at)
+                        .query(Task.class).optional().ifPresent(task ->
+                                notices.openWork("FOLLOWUP_OVERDUE", task.id(), "FOLLOWUP", task.ownerId(), at));
             });
         }
     }
@@ -286,8 +308,7 @@ public class Followups {
 
     private View view(Actor actor, Task task, boolean expanded) {
         boolean patient = actor.has("PATIENT");
-        var revision = patient ? jdbc.sql(REVISION_SQL + " and id = ?").params(task.id(), task.publishedRevisionId())
-                .query(Revision.class).single() : revision(task);
+        var revision = patient ? publishedRevision(task) : revision(task);
         List<Episodes.Segment> sources = patient || !expanded ? List.of() : jdbc.sql("""
                 select g.id, s.title, v.id as version_id, v.version_number, g.page_number, g.line_number, g.excerpt
                 from followup_revision_source r join document_segment g on g.id = r.segment_id
@@ -307,7 +328,8 @@ public class Followups {
         int version = patient ? revision.versionNumber() : task.versionNumber();
         return new View(task.id(), task.episodeId(), task.reference(), task.patient(), task.ownerId(), task.reviewerId(),
                 state, version, task.needsReview(), revision.taskKind(), revision.title(), instructions,
-                revision.dueAt(), patient ? null : revision.manualReference(), sources, entries, reviews);
+                revision.dueAt(), revision.revisitFrom(), revision.revisitTo(), revision.revisitDepartmentId(),
+                revision.revisitDepartment(), patient ? null : revision.manualReference(), sources, entries, reviews);
     }
 
     private Task load(long id) {
@@ -317,6 +339,16 @@ public class Followups {
     private Revision revision(Task task) {
         return jdbc.sql(REVISION_SQL + " and version_number = ?").params(task.id(), task.versionNumber())
                 .query(Revision.class).single();
+    }
+
+    private Revision publishedRevision(Task task) {
+        return jdbc.sql(REVISION_SQL + " and id = ?").params(task.id(), task.publishedRevisionId()).query(Revision.class).single();
+    }
+
+    private static void requireRevisitWindow(Revision revision) {
+        if (revision.taskKind().equals("REVISIT") && !revision.revisitWindow().configured()) {
+            throw Problems.conflict("请补充复诊日期和科室后重新审核。");
+        }
     }
 
     private void transition(Task task, String status) {
@@ -367,12 +399,14 @@ public class Followups {
 
     public record Draft(@NotNull Kind kind, @NotBlank @Size(max = 140) String title,
                         @NotBlank @Size(max = 4000) String instructions, @NotNull OffsetDateTime dueAt,
-                        @NotNull @Size(max = 40) List<@NotNull @Positive Long> segmentIds, @Size(max = 600) String manualReference) { }
+                        @NotNull @Size(max = 40) List<@NotNull @Positive Long> segmentIds, @Size(max = 600) String manualReference,
+                        LocalDate revisitFrom, LocalDate revisitTo, @Positive Long revisitDepartmentId) { }
     public record ActionInput(@NotNull Action action, @Positive int version, @Size(max = 2000) String note,
                               @Positive Long newOwnerId, ClosureReason closureReason, @Positive Long encounterId) { }
     public record View(long id, long episodeId, String reference, String patient, long ownerId, long reviewerId,
                        String status, int version, boolean needsReview, String kind, String title, String instructions,
-                       OffsetDateTime dueAt, String manualReference, List<Episodes.Segment> sources,
+                       OffsetDateTime dueAt, LocalDate revisitFrom, LocalDate revisitTo, Long revisitDepartmentId,
+                       String revisitDepartment, String manualReference, List<Episodes.Segment> sources,
                        List<Feedback> feedback, List<Review> reviews) { }
     public record Feedback(long id, String kind, String detail, OffsetDateTime createdAt, String actor,
                            Long sourceEncounterId) { }
@@ -380,5 +414,10 @@ public class Followups {
     private record Task(long id, long episodeId, long patientId, long ownerId, long reviewerId, String status,
                         int versionNumber, Long publishedRevisionId, boolean needsReview, String reference, String patient) { }
     private record Revision(long id, int versionNumber, int sourceVersion, String taskKind, String title,
-                            String instructions, OffsetDateTime dueAt, String manualReference) { }
+                            String instructions, OffsetDateTime dueAt, String manualReference, LocalDate revisitFrom,
+                            LocalDate revisitTo, Long revisitDepartmentId, String revisitDepartment) {
+        RevisitWindow revisitWindow() {
+            return new RevisitWindow(revisitFrom, revisitTo, revisitDepartmentId);
+        }
+    }
 }

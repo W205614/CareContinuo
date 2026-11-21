@@ -213,6 +213,8 @@ public class Episodes {
                 """).param(episodeId).query(Invalidated.class).list();
         var now = OffsetDateTime.now(clock);
         for (var task : tasks) {
+            notices.closeWork("FOLLOWUP_REVIEW", task.id(), null, "资料版本已更新");
+            notices.closeWork("FOLLOWUP_OVERDUE", task.id(), null, "资料版本已更新");
             jdbc.sql("""
                     update inbox_message as m set corrected_at = coalesce(m.corrected_at, ?)
                     from outbox_event e where m.event_id = e.id and e.episode_id = ? and e.object_id = ?

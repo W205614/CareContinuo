@@ -6,15 +6,16 @@ interface Reference { segmentId: number; quote: string }
 export interface Candidate { kind: string; title: string; instructions: string; dueDate: string | null; references: Reference[] }
 interface Job { id: number; status: string; failureCode: string | null; outcome: { model: string; candidates: Candidate[]; conflicts: { reason: string; references: Reference[] }[] } | null }
 
-const props = defineProps<{ episodeId: number; sourceVersion: number }>()
+const props = defineProps<{ episodeId: number; sourceVersion: number; reviewOnly?: boolean }>()
 const emit = defineEmits<{ use: [candidate: Candidate] }>()
 const jobs = ref<Job[]>([])
 const busy = ref(false)
 const error = ref('')
+const reasons = ref<Record<number, string>>({})
 let refreshTimer: ReturnType<typeof setTimeout> | undefined
 let requestVersion = 0
 
-const statusNames: Record<string, string> = { QUEUED: '已排队', RUNNING: '正在提取', READY: '可查看候选', CONFLICT: '资料冲突', FAILED: '生成失败', STALE: '资料已更新' }
+const statusNames: Record<string, string> = { QUEUED: '已排队', RUNNING: '正在提取', READY: '可查看候选', CONFLICT: '资料冲突', RESOLVED: '误报已解除', FAILED: '生成失败', STALE: '资料已更新' }
 const failures: Record<string, string> = {
   MODEL_KEY_UNAVAILABLE: '本机 Agent 尚未安装密钥。', MODEL_AUTHENTICATION_FAILED: '模型凭据未通过认证。',
   MODEL_PERMISSION_DENIED: '模型调用权限不足。', MODEL_UNAVAILABLE: '当前项目无法访问配置的模型。',
@@ -30,7 +31,7 @@ async function refresh() {
   try {
     const snapshot = await api<Job[]>(`/episodes/${episodeId}/agent-jobs`)
     if (generation !== requestVersion) return
-    jobs.value = snapshot
+    jobs.value = props.reviewOnly ? snapshot.filter((item) => ['CONFLICT', 'RESOLVED'].includes(item.status)) : snapshot
     if (snapshot.some((item) => ['QUEUED', 'RUNNING'].includes(item.status))) refreshTimer = setTimeout(refresh, 1500)
   } catch (failure) {
     if (generation === requestVersion) error.value = (failure as Error).message
@@ -45,8 +46,23 @@ async function generate() {
   finally { busy.value = false }
 }
 
+async function resolve(jobId: number) {
+  busy.value = true
+  error.value = ''
+  try {
+    await mutate('/agent-jobs/' + jobId + '/resolve-conflict', { reason: reasons.value[jobId] })
+    delete reasons.value[jobId]
+    await refresh()
+  } catch (failure) {
+    error.value = (failure as Error).message
+  } finally {
+    busy.value = false
+  }
+}
+
 watch(() => [props.episodeId, props.sourceVersion], () => {
   jobs.value = []
+  reasons.value = {}
   error.value = ''
   void refresh()
 }, { immediate: true })
@@ -54,10 +70,10 @@ onBeforeUnmount(() => { requestVersion++; clearTimeout(refreshTimer) })
 </script>
 
 <template>
-  <div class="panel">
+  <div v-if="!reviewOnly || jobs.length || error" class="panel">
     <div class="section-heading">
-      <h3>GPT 草稿候选</h3>
-      <button type="button" class="secondary" :disabled="busy || jobs.some((item) => ['QUEUED', 'RUNNING'].includes(item.status))" @click="generate">从当前资料提取</button>
+      <h3>{{ reviewOnly ? '资料冲突核实' : 'GPT 草稿候选' }}</h3>
+      <button v-if="!reviewOnly" type="button" class="secondary" :disabled="busy || jobs.some((item) => ['QUEUED', 'RUNNING'].includes(item.status))" @click="generate">从当前资料提取</button>
     </div>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <details v-for="job in jobs" :key="job.id" :open="job.id === jobs[0]?.id">
@@ -70,7 +86,13 @@ onBeforeUnmount(() => { requestVersion++; clearTimeout(refreshTimer) })
           <p v-for="evidence in conflict.references" :key="evidence.segmentId">{{ evidence.quote }}</p>
         </li>
       </ul>
-      <p v-if="job.status === 'CONFLICT'">请核实这里的原文，并更正资料后再提交审核。</p>
+      <template v-if="job.status === 'CONFLICT'">
+        <p>请核实引用的原文。资料有误时由随访人员更正，模型误报由审核医生解除。</p>
+        <form v-if="reviewOnly" class="field-grid" @submit.prevent="resolve(job.id)">
+          <label>误报处理依据<textarea v-model.trim="reasons[job.id]" maxlength="2000" required /></label>
+          <button type="submit" :disabled="busy">解除误报</button>
+        </form>
+      </template>
       <ul v-if="job.status === 'READY' && job.outcome" class="record-list">
         <li v-for="candidate in job.outcome.candidates" :key="`${candidate.title}-${candidate.references[0]?.segmentId}`" class="record">
           <div><strong>{{ candidate.title }}</strong><p>{{ candidate.instructions }}</p><p v-for="reference in candidate.references" :key="reference.segmentId">原文 · {{ reference.quote }}</p></div>

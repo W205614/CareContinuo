@@ -26,12 +26,12 @@ class Revisits {
 
     @Transactional
     Appointments.Change book(Actor actor, long taskId, long slotId, String key) {
-        followups.requireRevisitBooking(actor, taskId);
+        var window = followups.requireRevisitBooking(actor, taskId);
         boolean alreadyHasVisit = jdbc.sql("""
                 select exists(select 1 from followup_appointment r join appointment a on a.id = r.appointment_id
                 where r.task_id = ? and a.status in ('BOOKED', 'CHECKED_IN', 'IN_CONSULT', 'COMPLETED', 'STOPPED'))
                 """).param(taskId).query(Boolean.class).single();
-        var booked = appointments.bookRevisit(actor, taskId, slotId, key);
+        var booked = appointments.bookRevisit(actor, taskId, slotId, key, window);
         var alreadyLinked = jdbc.sql("select exists(select 1 from followup_appointment where task_id = ? and appointment_id = ?)")
                 .params(taskId, booked.id()).query(Boolean.class).single();
         if (alreadyLinked) return booked;
@@ -42,18 +42,25 @@ class Revisits {
     }
 
     List<LinkedVisit> list(Actor actor, long taskId) {
-        followups.requireReadAccess(actor, taskId);
+        var window = followups.publishedRevisitWindow(actor, taskId);
         audit.record(actor.id(), "FOLLOWUP", taskId, "READ_REVISITS");
         return jdbc.sql("""
                 select a.id as appointment_id, a.supersedes_id, a.status, s.starts_at, d.display_name as doctor,
-                       dep.name as department, v.id as encounter_id, v.completed_at
+                       dep.id as department_id, dep.name as department, v.id as encounter_id, v.completed_at
                 from followup_appointment r join appointment a on a.id = r.appointment_id
                 join schedule_slot s on s.id = a.slot_id join doctor d on d.id = s.doctor_id
                 join department dep on dep.id = d.department_id left join encounter v on v.appointment_id = a.id
                 where r.task_id = ? order by a.id desc limit 100
-                """).param(taskId).query(LinkedVisit.class).list();
+                """).param(taskId).query(Visit.class).list().stream().map(row -> {
+                    boolean needsReschedule = window != null && List.of("BOOKED", "STOPPED").contains(row.status())
+                            && !window.matches(row.startsAt(), row.departmentId());
+                    return new LinkedVisit(row.appointmentId(), row.supersedesId(), row.status(), row.startsAt(),
+                            row.doctor(), row.department(), row.encounterId(), row.completedAt(), needsReschedule);
+                }).toList();
     }
 
+    private record Visit(long appointmentId, Long supersedesId, String status, OffsetDateTime startsAt, String doctor,
+                         long departmentId, String department, Long encounterId, OffsetDateTime completedAt) { }
     record LinkedVisit(long appointmentId, Long supersedesId, String status, OffsetDateTime startsAt, String doctor,
-                       String department, Long encounterId, OffsetDateTime completedAt) { }
+                       String department, Long encounterId, OffsetDateTime completedAt, boolean needsReschedule) { }
 }

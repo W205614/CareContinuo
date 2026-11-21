@@ -67,7 +67,7 @@ class AgentJobs {
         var episode = episodes.lock(episodeId);
         episodes.authorized(actor, episodeId);
         var currentJob = jdbc.sql(JOB_SQL + " where episode_id = ? and source_version = ? and created_by = ?"
-                        + " and status in ('QUEUED', 'RUNNING', 'READY', 'CONFLICT') order by id desc limit 1")
+                        + " and status in ('QUEUED', 'RUNNING', 'READY', 'CONFLICT', 'RESOLVED') order by id desc limit 1")
                 .params(episodeId, episode.sourceVersion(), actor.id()).query(Job.class).optional();
         if (currentJob.isPresent()) return view(currentJob.get(), episode);
         var fragments = episodes.currentSegments(episodeId);
@@ -95,10 +95,28 @@ class AgentJobs {
         return view(job, episode);
     }
 
+    @Transactional
+    void resolveConflict(Actor actor, long id, String reason) {
+        if (!actor.has("REVIEWER")) throw Problems.missing();
+        var episode = episodes.lock(find(id).episodeId());
+        if (!accounts.actorById(actor.id()).has("REVIEWER")
+                || !jdbc.sql("select exists(select 1 from followup_task where episode_id = ? and reviewer_id = ?)")
+                .params(episode.id(), actor.id()).query(Boolean.class).single()) throw Problems.missing();
+        int resolved = jdbc.sql("""
+                update agent_job set status = 'RESOLVED'
+                where id = ? and status = 'CONFLICT' and source_version = ?
+                """).params(id, episode.sourceVersion()).update();
+        if (resolved == 0) throw Problems.conflict("该冲突已处理或所属资料版本已更新。");
+        notices.closeWork("AGENT_CONFLICT", id, actor.id(), reason.strip());
+        audit.record(actor.id(), "AGENT_JOB", id, "RESOLVE_CONFLICT");
+    }
+
     @Scheduled(fixedDelayString = "${care.agent.poll-ms:1500}", scheduler = "agentScheduler")
     void poll() {
-        jdbc.sql("update agent_job set status = 'FAILED', failure_code = 'MODEL_INTERRUPTED' where status = 'RUNNING' and expires_at <= ?")
-                .param(now()).update();
+        jdbc.sql("""
+                update agent_job set status = 'FAILED', failure_code = 'MODEL_INTERRUPTED'
+                where status = 'RUNNING' and expires_at <= clock_timestamp()
+                """).update();
         var next = jdbc.sql(JOB_SQL + " where status = 'QUEUED' order by id limit 1").query(Job.class).optional();
         if (next.isEmpty()) return;
         var job = next.get();
@@ -114,12 +132,14 @@ class AgentJobs {
         var job = find(pending.id());
         if (!job.status().equals("QUEUED")) return null;
         if (job.sourceVersion() != episode.sourceVersion() || !stillAuthorized(job)) {
-            stale(job.id());
+            jdbc.sql("update agent_job set status = 'STALE', failure_code = 'SOURCE_VERSION_STALE' where id = ?")
+                    .param(job.id()).update();
             return null;
         }
-        var at = now();
-        jdbc.sql("update agent_job set status = 'RUNNING', started_at = ?, expires_at = ? where id = ?")
-                .params(at, at.plusMinutes(2), job.id()).update();
+        jdbc.sql("""
+                update agent_job set status = 'RUNNING', started_at = statement_timestamp(),
+                  expires_at = statement_timestamp() + interval '2 minutes' where id = ?
+                """).param(job.id()).update();
         audit.record(job.createdBy(), "AGENT_JOB", job.id(), "LOAD_AUTHORIZED_SOURCE");
         var fragments = episodes.currentSegments(job.episodeId()).stream().map(s ->
                 new Fragment(s.id(), s.versionId(), s.pageNumber(), s.lineNumber(), s.excerpt())).toList();
@@ -159,20 +179,28 @@ class AgentJobs {
         var episode = episodes.lock(started.episodeId());
         var job = find(started.id());
         if (!job.status().equals("RUNNING")) return;
-        if (job.sourceVersion() != episode.sourceVersion() || !stillAuthorized(job)) {
-            stale(job.id());
-            return;
-        }
+        String status;
         String failure = outcome.failure();
-        if (failure == null && !grounded(request, outcome.result())) failure = "MODEL_SOURCE_MISMATCH";
-        if (failure != null) {
-            jdbc.sql("update agent_job set status = 'FAILED', failure_code = ? where id = ?").params(failure, job.id()).update();
-            return;
+        String result = null;
+        if (job.sourceVersion() != episode.sourceVersion() || !stillAuthorized(job)) {
+            status = "STALE";
+            failure = "SOURCE_VERSION_STALE";
+        } else if (failure != null) {
+            status = "FAILED";
+        } else if (!grounded(request, outcome.result())) {
+            status = "FAILED";
+            failure = "MODEL_SOURCE_MISMATCH";
+        } else {
+            status = outcome.result().conflicts().isEmpty() ? "READY" : "CONFLICT";
+            result = json.writeValueAsString(outcome.result());
         }
-        boolean conflict = !outcome.result().conflicts().isEmpty();
-        jdbc.sql("update agent_job set status = ?, outcome = cast(? as jsonb) where id = ?")
-                .params(conflict ? "CONFLICT" : "READY", json.writeValueAsString(outcome.result()), job.id()).update();
-        if (conflict) notices.openWork("AGENT_CONFLICT", job.id(), "FOLLOWUP", episode.ownerId(), now());
+        int completed = jdbc.sql("""
+                update agent_job set status = ?, failure_code = ?, outcome = cast(? as jsonb)
+                where id = ? and status = 'RUNNING' and expires_at > clock_timestamp()
+                """).param(status).param(failure).param(result).param(job.id()).update();
+        if (completed == 1 && status.equals("CONFLICT")) {
+            notices.openWork("AGENT_CONFLICT", job.id(), "FOLLOWUP", episode.ownerId(), now());
+        }
     }
 
     private static boolean grounded(ExtractionRequest request, Extraction result) {
@@ -208,10 +236,6 @@ class AgentJobs {
         } catch (ResponseStatusException denied) {
             return false;
         }
-    }
-
-    private void stale(long id) {
-        jdbc.sql("update agent_job set status = 'STALE', failure_code = 'SOURCE_VERSION_STALE' where id = ?").param(id).update();
     }
 
     private Job find(long id) {

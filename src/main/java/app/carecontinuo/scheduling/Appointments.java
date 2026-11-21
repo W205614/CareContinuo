@@ -1,6 +1,8 @@
 package app.carecontinuo.scheduling;
 
 import app.carecontinuo.common.Problems;
+import app.carecontinuo.followup.RevisitScheduling;
+import app.carecontinuo.followup.RevisitWindow;
 import app.carecontinuo.identity.Accounts.Actor;
 import app.carecontinuo.notification.Notifications;
 import java.time.Clock;
@@ -27,14 +29,16 @@ public class Appointments {
 
     private final JdbcClient jdbc;
     private final Schedule schedule;
+    private final RevisitScheduling revisits;
     private final Notifications notices;
     private final Clock clock;
     private final TransactionTemplate transactions;
 
     Appointments(JdbcClient jdbc, Schedule schedule, Notifications notices,
-                 Clock clock, TransactionTemplate transactions) {
+                 Clock clock, TransactionTemplate transactions, RevisitScheduling revisits) {
         this.jdbc = jdbc;
         this.schedule = schedule;
+        this.revisits = revisits;
         this.notices = notices;
         this.clock = clock;
         this.transactions = transactions;
@@ -74,10 +78,13 @@ public class Appointments {
     }
 
     @Transactional
-    public Change bookRevisit(Actor actor, long followupId, long slotId, String key) {
+    public Change bookRevisit(Actor actor, long followupId, long slotId, String key, RevisitWindow window) {
         if (!actor.has("PATIENT")) throw Problems.forbidden();
-        return once(actor, "BOOK_REVISIT", key, followupId + ":" + slotId, () ->
-                reserve(actor, schedule.slot(slotId, true), null));
+        return once(actor, "BOOK_REVISIT", key, followupId + ":" + slotId, () -> {
+            var slot = schedule.slot(slotId, true);
+            window.requireMatch(slot.startsAt(), slot.departmentId());
+            return reserve(actor, slot, null);
+        });
     }
 
     @Transactional
@@ -103,12 +110,14 @@ public class Appointments {
             requireOwner(actor, appointment);
             long oldId = appointment.slotId();
             if (oldId == targetId) throw Problems.invalid("请选择不同的出诊时段。");
+            var window = revisits.lockWindowForReschedule(id);
             var first = schedule.slot(Math.min(oldId, targetId), true);
             var second = schedule.slot(Math.max(oldId, targetId), true);
             var original = first.id() == oldId ? first : second;
             var target = first.id() == targetId ? first : second;
             appointment = stored(id);
             allowChange(original, appointment.status());
+            if (window != null) window.requireMatch(target.startsAt(), target.departmentId());
             var replacement = reserve(actor, target, id);
             jdbc.sql("""
                     insert into followup_appointment(task_id, appointment_id)

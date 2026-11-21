@@ -1,4 +1,10 @@
 services:
+  postgres:
+    labels:
+      app.carecontinuo.e2e: "true"
+  web:
+    labels:
+      app.carecontinuo.e2e: "true"
   agent:
     command: [".venv/bin/uvicorn", "model_fixture:app", "--host", "0.0.0.0", "--port", "8000"]
     volumes:

@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
 import { randomUUID } from 'node:crypto'
-import { get, loginInBrowser, post, runSql, signedIn, type Session } from './fixtures'
+import { book, createSlot, get, loginInBrowser, post, runSql, signedIn, type Session } from './fixtures'
 
 async function setup(owner: Session) {
   const options = await (await get(owner, '/care-directory')).json()
@@ -15,7 +15,7 @@ async function setup(owner: Session) {
 }
 
 function draft(segmentIds: number[], title: string, text: string) {
-  return { kind: 'REVISIT', title, instructions: text, dueAt: new Date(Date.now() + 3 * 86_400_000).toISOString(),
+  return { kind: 'PENDING_RESULT', title, instructions: text, dueAt: new Date(Date.now() + 3 * 86_400_000).toISOString(),
     segmentIds, manualReference: segmentIds.length ? null : '合成医护手工记录' }
 }
 
@@ -112,8 +112,9 @@ test('AC-08 an overdue task can be transferred and closed with its history', asy
 })
 
 test('AC-06 failed station delivery reaches the owner and manual retry delivers once', async () => {
-  const [owner, reviewer, patient, ops] = await Promise.all(['followup', 'doctor', 'patient-a', 'operations'].map(signedIn))
-  const { episodeId, reviewerId } = await setup(owner)
+  const [owner, reviewer, patient, ops, replacement] = await Promise.all(
+    ['followup', 'doctor', 'patient-a', 'operations', 'followup-b'].map(signedIn))
+  const { episodeId, reviewerId, secondOwner } = await setup(owner)
   const id = (await (await post(owner, '/followups', { episodeId, reviewerId, draft: draft([], '恢复通知', '合成随访安排') })).json()).id as number
   const trigger = `synthetic_notice_failure_${episodeId}`
   runSql(`
@@ -142,10 +143,92 @@ test('AC-06 failed station delivery reaches the owner and manual retry delivers 
   const work = (await (await get(owner, '/work-items')).json()).find((item: { kind: string; objectId: number }) =>
     item.kind === 'NOTIFICATION_FAILED' && item.objectId === eventId)
   expect(work.status).toBe('OPEN')
-  expect((await post(ops, `/work-items/${work.id}/retry`)).status()).toBe(404)
-  expect((await post(owner, `/work-items/${work.id}/retry`)).status()).toBe(204)
+  const retryPath = '/work-items/' + work.id + '/retry'
+  expect((await post(ops, retryPath)).status()).toBe(404)
+  const ownerId = (await (await get(owner, '/session')).json()).id
+  runSql("delete from user_role where user_id = " + ownerId + " and role = 'FOLLOWUP'")
+  try {
+    const items = await get(owner, '/work-items')
+    expect(items.status()).toBe(200)
+    expect(await items.json()).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: work.id })]))
+    expect((await post(owner, retryPath)).status()).toBe(404)
+  } finally {
+    runSql("insert into user_role(user_id, role) values (" + ownerId + ", 'FOLLOWUP')")
+  }
+  runSql('update app_user set enabled = false where id = ' + ownerId)
+  try {
+    expect((await get(owner, '/work-items')).status()).toBe(404)
+    expect((await post(owner, retryPath)).status()).toBe(404)
+  } finally {
+    runSql('update app_user set enabled = true where id = ' + ownerId)
+  }
+  expect((await action(owner, id, 'TRANSFER', 1, { newOwnerId: secondOwner, note: '更换随访负责人' })).status()).toBe(204)
+  expect((await post(owner, retryPath)).status()).toBe(404)
+  expect((await post(replacement, retryPath)).status()).toBe(204)
   await expect.poll(async () => (await (await get(patient, '/inbox')).json()).filter(
     (item: { kind: string; objectId: number }) => item.kind === 'FOLLOWUP_PUBLISHED' && item.objectId === id,
   ).length, { timeout: 12_000 }).toBe(1)
-  expect((await post(owner, `/work-items/${work.id}/retry`)).status()).toBe(404)
+  expect((await post(replacement, retryPath)).status()).toBe(404)
+})
+
+test('source correction closes old work and the newly published version can become overdue again', async () => {
+  const [owner, reviewer] = await Promise.all(['followup', 'doctor'].map(signedIn))
+  const { episodeId, reviewerId } = await setup(owner)
+  async function create(title: string) {
+    const response = await post(owner, '/followups', { episodeId, reviewerId, draft: draft([], title, '合成') })
+    expect(response.status()).toBe(201)
+    return (await response.json()).id as number
+  }
+  const published = await create('原随访')
+  const inReview = await create('等待审核')
+  const publish = async (version: number) => {
+    for (const [session, name] of [[owner, 'SUBMIT'], [reviewer, 'APPROVE'], [reviewer, 'DISPATCH']] as const) {
+      expect((await action(session, published, name, version)).status()).toBe(204)
+    }
+  }
+  const overdue = async () => (await (await get(owner, '/work-items')).json()).find(
+    (item: { kind: string; objectId: number }) => item.kind === 'FOLLOWUP_OVERDUE' && item.objectId === published,
+  )
+  const expire = (version: number) => runSql(
+    "update followup_revision set due_at = now() - interval '1 minute' where task_id = " + published + ' and version_number = ' + version,
+  )
+
+  await publish(1)
+  expect((await action(owner, inReview, 'SUBMIT', 1)).status()).toBe(204)
+  expire(1)
+  await expect.poll(async () => (await overdue())?.status, { timeout: 12_000 }).toBe('OPEN')
+  const old = await overdue()
+  expect((await post(owner, '/episodes/' + episodeId + '/documents', { title: '补充资料', text: '更新后的合成资料' })).status()).toBe(201)
+  expect((await overdue()).status).toBe('DONE')
+  expect((await (await get(reviewer, '/work-items')).json())).toEqual(expect.arrayContaining([
+    expect.objectContaining({ kind: 'FOLLOWUP_REVIEW', objectId: inReview, status: 'DONE' }),
+  ]))
+  expect((await post(owner, '/followups/' + published + '/draft', {
+    version: 1, draft: draft([], '新版随访', '更正的安排'),
+  })).status()).toBe(204)
+  await publish(2)
+  expect((await overdue()).status).toBe('DONE')
+  expire(2)
+  await expect.poll(async () => (await overdue())?.status, { timeout: 12_000 }).toBe('OPEN')
+  expect((await overdue()).id).toBe(old.id)
+  expect(new Date((await overdue()).dueAt).getTime()).toBeGreaterThan(new Date(old.dueAt).getTime())
+})
+
+test('operations can retry a shared scheduling notification', async () => {
+  const [operator, patient] = await Promise.all(['operations', 'patient-a'].map(signedIn))
+  const slot = await createSlot(operator, 180)
+  const booked = await book(patient, slot)
+  expect(booked.status()).toBe(201)
+  const appointment = (await booked.json()).id
+  const event = runSql("insert into outbox_event(dedupe_key, recipient_user_id, kind, object_id, title, available_at, state) "
+    + "select 'synthetic:operations:' || id, recipient_user_id, kind, object_id, title, now(), 'FAILED' from outbox_event "
+    + "where kind = 'APPOINTMENT_BOOKED' and object_id = " + appointment + ' returning id')
+  const id = Number(runSql("insert into work_item(kind, object_id, role, due_at) values ('NOTIFICATION_FAILED', " + event
+    + ", 'OPERATIONS', now()) returning id"))
+  expect(id).toBeGreaterThan(0)
+  expect((await (await get(operator, '/work-items')).json())).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id, status: 'OPEN' }),
+  ]))
+  expect((await post(operator, '/work-items/' + id + '/retry')).status()).toBe(204)
+  await expect.poll(() => runSql('select state from outbox_event where id = ' + event)).toBe('SENT')
 })

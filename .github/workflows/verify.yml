@@ -12,6 +12,9 @@ jobs:
     timeout-minutes: 25
     env:
       COMPOSE_PROJECT_NAME: carecontinuo-ci
+      CARE_WEB_PORT: '18081'
+      CARE_WEB_URL: http://127.0.0.1:18081
+      CARE_E2E_DB_CONTAINER: carecontinuo-ci-postgres-1
       COMPOSE_FILE: compose.yaml:compose.verify.yaml
     steps:
       - uses: actions/checkout@v5
