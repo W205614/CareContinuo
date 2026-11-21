@@ -41,6 +41,19 @@ h1, h2, p { margin: 0; }
 .workspace-heading { display: flex; flex-wrap: wrap; gap: 1rem; justify-content: space-between; align-items: center; padding: 1rem 0; border-bottom: 1px solid var(--line); }
 .workspace-heading p { color: var(--muted); }
 .secondary { color: var(--accent); background: transparent; }
+.panel { padding: 1.5rem 0; }
+.panel > p, .panel > details { margin: .8rem 0; }
+.workspace-section { margin-top: 1rem; }
+.section-heading, .row-actions { display: flex; gap: .65rem; align-items: center; flex-wrap: wrap; }
+.section-heading { justify-content: space-between; }
+.record-list { list-style: none; margin: .9rem 0 0; padding: 0; }
+.record { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .65rem 1rem; align-items: center; padding: .85rem 0; border-bottom: 1px solid var(--line); }
+.record > div:first-child > div { color: var(--muted); }
+.field-grid { display: flex; flex-wrap: wrap; align-items: end; gap: .75rem; padding: .85rem 0; }
+.record form, .message-detail { flex-basis: 100%; }
+.field-grid label { display: flex; flex-direction: column; gap: .25rem; min-width: 0; }
+.field-grid input, .field-grid select, .field-grid textarea { max-width: 100%; }
+.field-grid textarea { min-height: 4rem; min-width: min(15rem, 85vw); }
 @media (max-width: 760px) {
   .sign-in { grid-template-columns: 1fr; }
   .journey, .credentials { padding: 2rem 1.25rem; }

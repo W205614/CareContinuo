@@ -2,9 +2,9 @@ FROM eclipse-temurin:21.0.9_10-jdk-jammy AS build
 WORKDIR /app
 COPY mvnw pom.xml ./
 COPY .mvn ./.mvn
-RUN chmod +x mvnw && ./mvnw -B -q dependency:go-offline
 COPY src ./src
-RUN ./mvnw -B -DskipTests package
+RUN --mount=type=cache,target=/root/.m2 \
+    chmod +x mvnw && ./mvnw -B -DskipTests -Dmaven.resolver.transport=wagon -Dmaven.wagon.http.retryHandler.count=3 package
 
 FROM eclipse-temurin:21.0.9_10-jre-jammy
 WORKDIR /app
