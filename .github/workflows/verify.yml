@@ -64,6 +64,12 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci && npx playwright install --with-deps chromium
         working-directory: web
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - run: ./mvnw -B dependency:resolve
       - run: python3 deploy/preprod/prepare.py .local/preprod-ci
       - run: docker compose -f compose.preprod.yaml --env-file .local/preprod-ci/compose.env -p "$CARE_PREPROD_PROJECT" build
       - run: docker compose -f compose.preprod.yaml --env-file .local/preprod-ci/compose.env -p "$CARE_PREPROD_PROJECT" up --no-build --wait --wait-timeout 180
@@ -78,6 +84,7 @@ jobs:
       - run: |
           python3 deploy/preprod/control.py --env-file .local/preprod-ci/compose.env --project "$CARE_PREPROD_PROJECT" backup .local/preprod-ci/smoke.dump
           python3 deploy/preprod/control.py --env-file .local/preprod-ci/compose.env --project "$CARE_PREPROD_PROJECT" restore .local/preprod-ci/smoke.dump
+      - run: python3 deploy/preprod/scan.py .local/preprod-ci/security
       - if: always()
         run: |
           if test -f .local/preprod-ci/compose.env; then
