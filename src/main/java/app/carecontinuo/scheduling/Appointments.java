@@ -74,6 +74,13 @@ public class Appointments {
     }
 
     @Transactional
+    public Change bookRevisit(Actor actor, long followupId, long slotId, String key) {
+        if (!actor.has("PATIENT")) throw Problems.forbidden();
+        return once(actor, "BOOK_REVISIT", key, followupId + ":" + slotId, () ->
+                reserve(actor, schedule.slot(slotId, true), null));
+    }
+
+    @Transactional
     Change cancel(Actor actor, long id, String key) {
         return once(actor, "CANCEL", key, Long.toString(id), () -> {
             var appointment = stored(id);
@@ -103,6 +110,10 @@ public class Appointments {
             appointment = stored(id);
             allowChange(original, appointment.status());
             var replacement = reserve(actor, target, id);
+            jdbc.sql("""
+                    insert into followup_appointment(task_id, appointment_id)
+                    select task_id, ? from followup_appointment where appointment_id = ?
+                    """).params(replacement.id(), id).update();
             if (original.stoppedAt() == null) release(oldId);
             change(appointment, "RESCHEDULED", actor.id(), null);
             notices.closeWork("STOPPED_APPOINTMENT", id, actor.id(), "患者已改约");

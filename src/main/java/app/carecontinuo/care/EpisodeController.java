@@ -55,6 +55,12 @@ class EpisodeController {
                 input.reference().strip(), input.careDate()));
     }
 
+    @PostMapping("/appointments/{id}/return-plan")
+    @ResponseStatus(HttpStatus.CREATED)
+    Map<String, Long> outpatient(Principal principal, @PathVariable long id, @Valid @RequestBody Assignment input) {
+        return Map.of("id", episodes.registerOutpatient(accounts.actor(principal), id, input.ownerId()));
+    }
+
     @GetMapping("/episodes/{id}/documents")
     List<Episodes.Document> documents(Principal principal, @PathVariable long id) {
         return episodes.documents(accounts.actor(principal), id);
@@ -91,6 +97,7 @@ class EpisodeController {
 
     record Discharge(@Positive long patientId, @NotBlank @Size(max = 100) String reference,
                      @NotNull LocalDate careDate) { }
+    record Assignment(@Positive long ownerId) { }
     record Text(@Positive Long documentId, @NotBlank @Size(max = 200) String title,
                 @NotBlank @Size(max = 80000) String text) { }
 }

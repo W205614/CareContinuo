@@ -25,7 +25,9 @@ public class Episodes {
             """;
     private static final String CAN_SEE = """
             (e.owner_id = :actor and :followup or exists (select 1 from followup_task t where t.episode_id = e.id
-            and (t.owner_id = :actor and :followup or t.reviewer_id = :actor and :reviewer)))
+            and (t.owner_id = :actor and :followup or t.reviewer_id = :actor and :reviewer))
+            or (:doctor and exists (select 1 from encounter visit join doctor d on d.id = visit.doctor_id
+            where visit.id = e.encounter_id and d.user_id = :actor)))
             """;
 
     private final JdbcClient jdbc;
@@ -89,6 +91,32 @@ public class Episodes {
         } catch (DuplicateKeyException conflict) {
             throw Problems.conflict("该出院记录编号已登记。");
         }
+    }
+
+    @Transactional
+    public long registerOutpatient(Actor actor, long appointmentId, long ownerId) {
+        if (!actor.has("DOCTOR")) throw Problems.missing();
+        var completed = jdbc.sql("""
+                select v.id, a.patient_id, v.return_plan, (v.completed_at at time zone 'Asia/Shanghai')::date as care_date
+                from encounter v join appointment a on a.id = v.appointment_id join doctor d on d.id = v.doctor_id
+                where a.id = ? and d.user_id = ? and v.completed_at is not null for update of v
+                """).params(appointmentId, actor.id()).query(CompletedVisit.class).optional().orElseThrow(Problems::missing);
+        var existing = jdbc.sql("select id from care_episode where encounter_id = ?")
+                .param(completed.id()).query(Long.class).optional();
+        if (existing.isPresent()) return existing.get();
+        if (completed.returnPlan() == null || completed.returnPlan().isBlank()) {
+            throw Problems.conflict("请先在接诊记录中填写复诊安排。");
+        }
+        requireAccountRole(ownerId, "FOLLOWUP");
+        long id = jdbc.sql("""
+                insert into care_episode(patient_id, owner_id, encounter_id, kind, reference, care_date)
+                values (?, ?, ?, 'OUTPATIENT', ?, ?) returning id
+                """).params(completed.patientId(), ownerId, completed.id(), "OP-" + appointmentId, completed.careDate())
+                .query(Long.class).single();
+        store(actor, id, null, "门诊复诊安排", DocumentText.extract("outpatient-return.txt",
+                completed.returnPlan().getBytes(StandardCharsets.UTF_8)));
+        audit.record(actor.id(), "EPISODE", id, "REGISTER_OUTPATIENT_HANDOFF");
+        return id;
     }
 
     public List<Document> documents(Actor actor, long id) {
@@ -211,11 +239,11 @@ public class Episodes {
 
     private JdbcClient.StatementSpec entitled(String sql, Actor actor) {
         return jdbc.sql(sql).param("actor", actor.id()).param("followup", actor.has("FOLLOWUP"))
-                .param("reviewer", actor.has("REVIEWER"));
+                .param("reviewer", actor.has("REVIEWER")).param("doctor", actor.has("DOCTOR"));
     }
 
     private static void requireClinical(Actor actor) {
-        if (!actor.has("FOLLOWUP") && !actor.has("REVIEWER")) throw Problems.missing();
+        if (!actor.has("FOLLOWUP") && !actor.has("REVIEWER") && !actor.has("DOCTOR")) throw Problems.missing();
     }
 
     public record Episode(long id, long patientId, String patient, long ownerId, String kind, String reference,
@@ -228,4 +256,5 @@ public class Episodes {
                            OffsetDateTime createdAt) { }
     public record Attachment(String filename, String mediaType, byte[] content) { }
     private record Invalidated(long id, long ownerId) { }
+    private record CompletedVisit(long id, long patientId, String returnPlan, LocalDate careDate) { }
 }

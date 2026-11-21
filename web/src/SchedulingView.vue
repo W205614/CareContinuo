@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { api, mutate, type Actor } from './api'
+import { appointmentStates as states, type Schedule } from './appointments'
+import type { Choice, Directory } from './followup'
 import { fromShanghaiInput, shanghaiTime } from './time'
 
-interface Slot { id: number; doctorName: string; department: string; startsAt: string; endsAt: string; remaining: number; stoppedAt: string | null; stopReason: string | null }
-interface Schedule { departments: { id: number; name: string }[]; doctors: { id: number; displayName: string }[]; slots: Slot[] }
 interface Appointment { id: number; slotId: number; doctor: string; department: string; startsAt: string; endsAt: string; status: string; patientName: string; stopReason: string | null }
 
-const props = defineProps<{ actor: Actor }>()
+const props = defineProps<{ actor: Actor; refreshVersion: number }>()
+const emit = defineEmits<{ changed: [] }>()
 const patient = props.actor.roles.includes('PATIENT')
 const doctor = props.actor.roles.includes('DOCTOR')
 const operations = props.actor.roles.includes('OPERATIONS')
@@ -20,6 +21,9 @@ const activeMove = ref<number>()
 const activeCompletion = ref<number>()
 const activeCorrection = ref<number>()
 const activeStop = ref<number>()
+const activeHandoff = ref<number>()
+const handoffOwner = ref(0)
+const staff = ref<Choice[]>([])
 const reason = ref('')
 const note = ref('')
 const returnPlan = ref('')
@@ -27,11 +31,6 @@ const newSlot = ref({ doctorId: 0, startsAt: '', endsAt: '', capacity: 1 })
 const newDepartment = ref('')
 const newDoctor = ref({ username: '', displayName: '', departmentId: 0 })
 const usableSlots = computed(() => schedule.value.slots.filter((slot) => slot.remaining > 0 && !slot.stoppedAt))
-
-const states: Record<string, string> = {
-  BOOKED: '已预约', CHECKED_IN: '已签到', IN_CONSULT: '已接诊', COMPLETED: '已完成',
-  CANCELLED: '已取消', RESCHEDULED: '已改约', NO_SHOW: '未到诊', STOPPED: '停诊待处理',
-}
 
 async function refresh() {
   const [newSchedule, appointments] = await Promise.all([api<Schedule>('/schedule'), api<Appointment[]>('/appointments')])
@@ -49,6 +48,7 @@ async function run(action: () => Promise<unknown>, done: string) {
     await action()
     status.value = done
     await refresh()
+    emit('changed')
   } catch (failure) {
     error.value = (failure as Error).message
   } finally {
@@ -80,9 +80,27 @@ function submitSlot() {
 function reportStop(id: number) { activeStop.value = id; reason.value = '' }
 function reportCorrection(id: number) { activeCorrection.value = id; reason.value = '' }
 
-onMounted(async () => {
+async function chooseHandoff(id: number) {
+  try {
+    staff.value = (await api<Directory>('/care-directory')).owners
+    handoffOwner.value = staff.value[0]?.id ?? 0
+    activeHandoff.value = id
+  } catch (failure) { error.value = (failure as Error).message }
+}
+
+function submitHandoff(id: number) {
+  return run(async () => {
+    await mutate(`/appointments/${id}/return-plan`, { ownerId: handoffOwner.value })
+    activeHandoff.value = undefined
+  }, '门诊复诊安排已交接。')
+}
+
+async function refreshWithFeedback() {
   try { await refresh() } catch (failure) { error.value = (failure as Error).message }
-})
+}
+
+onMounted(refreshWithFeedback)
+watch(() => props.refreshVersion, refreshWithFeedback)
 </script>
 
 <template>
@@ -147,6 +165,7 @@ onMounted(async () => {
             <button v-if="doctor && item.status === 'CHECKED_IN'" :disabled="busy" type="button" @click="run(() => mutate(`/appointments/${item.id}/start`), '已开始接诊。')">开始接诊</button>
             <button v-if="doctor && item.status === 'IN_CONSULT' && activeCompletion !== item.id" type="button" @click="activeCompletion = item.id; note = ''; returnPlan = ''">录入接诊结果</button>
             <button v-if="doctor && item.status === 'NO_SHOW' && activeCorrection !== item.id" type="button" class="secondary" @click="reportCorrection(item.id)">更正签到</button>
+            <button v-if="doctor && item.status === 'COMPLETED' && activeHandoff !== item.id" type="button" class="secondary" @click="chooseHandoff(item.id)">交接门诊复诊</button>
           </div>
           <form v-if="activeCompletion === item.id" class="field-grid" @submit.prevent="run(async () => { await mutate(`/appointments/${item.id}/complete`, { note, returnPlan }); activeCompletion = undefined }, '接诊已完成。')">
             <label>模拟接诊记录<textarea v-model.trim="note" maxlength="4000" required /></label>
@@ -155,6 +174,10 @@ onMounted(async () => {
           </form>
           <form v-if="activeCorrection === item.id" class="field-grid" @submit.prevent="run(async () => { await mutate(`/appointments/${item.id}/correct-attendance`, { reason }); activeCorrection = undefined }, '签到已更正。')">
             <label>更正原因<input v-model.trim="reason" maxlength="400" required /></label><button :disabled="busy">确认更正</button>
+          </form>
+          <form v-if="activeHandoff === item.id" class="field-grid" @submit.prevent="submitHandoff(item.id)">
+            <label>随访接手人<select v-model.number="handoffOwner" required><option v-for="person in staff" :key="person.id" :value="person.id">{{ person.name }}</option></select></label>
+            <button :disabled="busy || !handoffOwner">确认交接</button>
           </form>
         </li>
       </ul>

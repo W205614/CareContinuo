@@ -7,9 +7,10 @@ export interface Followup {
   id: number; episodeId: number; reference: string; patient: string; ownerId: number; reviewerId: number; status: string;
   version: number; needsReview: boolean; kind: string; title: string; instructions: string | null; dueAt: string;
   manualReference: string | null; sources: Source[];
-  feedback: { id: number; kind: string; detail: string; actor: string; createdAt: string }[];
+  feedback: { id: number; kind: string; detail: string; actor: string; createdAt: string; sourceEncounterId: number | null }[];
   reviews: { id: number; decision: string; reason: string | null; createdAt: string }[];
 }
+export interface Revisit { appointmentId: number; supersedesId: number | null; status: string; startsAt: string; doctor: string; department: string; encounterId: number | null; completedAt: string | null }
 
 export const followupStates: Record<string, string> = {
   DRAFT: '草稿', IN_REVIEW: '待审核', APPROVED: '审核通过', DISPATCHED: '已派发',

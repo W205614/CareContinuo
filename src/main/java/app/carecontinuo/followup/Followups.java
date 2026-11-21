@@ -67,6 +67,19 @@ public class Followups {
         return view(actor, task, true);
     }
 
+    public void requireReadAccess(Actor actor, long id) {
+        authorize(actor, load(id));
+    }
+
+    public void requireRevisitBooking(Actor actor, long id) {
+        if (!actor.has("PATIENT")) throw Problems.missing();
+        episodes.lock(load(id).episodeId());
+        var task = load(id);
+        authorize(actor, task);
+        requirePublished(task);
+        if (!revision(task).taskKind().equals("REVISIT")) throw Problems.conflict("此随访事项无需预约复诊。");
+    }
+
     @Transactional
     public long create(Actor actor, long episodeId, long reviewerId, Draft draft) {
         if (!actor.has("FOLLOWUP")) throw Problems.forbidden();
@@ -154,7 +167,7 @@ public class Followups {
             case VERIFY -> {
                 requireOwner(actor, task);
                 requirePublished(task);
-                feedback(actor, task, "VERIFICATION", note(input));
+                verify(actor, task, input);
                 transition(task, "VERIFIED");
                 closeWork(actor, task, "结果已核实");
             }
@@ -258,6 +271,19 @@ public class Followups {
                 .params(task.id(), actor.id(), kind, detail).update();
     }
 
+    private void verify(Actor actor, Task task, ActionInput input) {
+        if (input.encounterId() != null && !jdbc.sql("""
+                select exists(select 1 from followup_appointment link join encounter v on v.appointment_id = link.appointment_id
+                  where link.task_id = ? and v.id = ? and v.completed_at is not null)
+                """).params(task.id(), input.encounterId()).query(Boolean.class).single()) {
+            throw Problems.conflict("请选择该任务关联且已完成的接诊记录。");
+        }
+        jdbc.sql("""
+                insert into followup_feedback(task_id, actor_id, kind, detail, source_encounter_id)
+                values (?, ?, 'VERIFICATION', ?, ?)
+                """).param(task.id()).param(actor.id()).param(note(input)).param(input.encounterId()).update();
+    }
+
     private View view(Actor actor, Task task, boolean expanded) {
         boolean patient = actor.has("PATIENT");
         var revision = patient ? jdbc.sql(REVISION_SQL + " and id = ?").params(task.id(), task.publishedRevisionId())
@@ -269,7 +295,7 @@ public class Followups {
                 where r.revision_id = ? order by s.id, g.id
                 """).param(revision.id()).query(Episodes.Segment.class).list();
         String feedbackSql = """
-                select f.id, f.kind, f.detail, f.created_at, u.display_name as actor
+                select f.id, f.kind, f.detail, f.created_at, u.display_name as actor, f.source_encounter_id
                 from followup_feedback f join app_user u on u.id = f.actor_id where f.task_id = ?
                 """ + (patient ? " and f.kind in ('PATIENT', 'VERIFICATION')" : "") + " order by f.id";
         List<Feedback> entries = expanded ? jdbc.sql(feedbackSql).param(task.id()).query(Feedback.class).list() : List.of();
@@ -343,12 +369,13 @@ public class Followups {
                         @NotBlank @Size(max = 4000) String instructions, @NotNull OffsetDateTime dueAt,
                         @NotNull @Size(max = 40) List<@NotNull @Positive Long> segmentIds, @Size(max = 600) String manualReference) { }
     public record ActionInput(@NotNull Action action, @Positive int version, @Size(max = 2000) String note,
-                              @Positive Long newOwnerId, ClosureReason closureReason) { }
+                              @Positive Long newOwnerId, ClosureReason closureReason, @Positive Long encounterId) { }
     public record View(long id, long episodeId, String reference, String patient, long ownerId, long reviewerId,
                        String status, int version, boolean needsReview, String kind, String title, String instructions,
                        OffsetDateTime dueAt, String manualReference, List<Episodes.Segment> sources,
                        List<Feedback> feedback, List<Review> reviews) { }
-    public record Feedback(long id, String kind, String detail, OffsetDateTime createdAt, String actor) { }
+    public record Feedback(long id, String kind, String detail, OffsetDateTime createdAt, String actor,
+                           Long sourceEncounterId) { }
     public record Review(long id, String decision, String reason, OffsetDateTime createdAt) { }
     private record Task(long id, long episodeId, long patientId, long ownerId, long reviewerId, String status,
                         int versionNumber, Long publishedRevisionId, boolean needsReview, String reference, String patient) { }

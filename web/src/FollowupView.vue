@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { api, mutate, type Actor } from './api'
-import { feedbackKinds, followupStates, type CareEpisode, type Directory, type DocumentVersion, type Followup, type Source } from './followup'
+import { appointmentStates, type Schedule, type Slot } from './appointments'
+import { feedbackKinds, followupStates, type CareEpisode, type Directory, type DocumentVersion, type Followup, type Revisit, type Source } from './followup'
 import { fromShanghaiInput, shanghaiTime } from './time'
 import AgentSuggestions, { type Candidate } from './AgentSuggestions.vue'
 
-const props = defineProps<{ actor: Actor }>()
+const props = defineProps<{ actor: Actor; refreshVersion: number }>()
+const emit = defineEmits<{ booked: [] }>()
 const patient = props.actor.roles.includes('PATIENT')
 const followup = props.actor.roles.includes('FOLLOWUP')
 const reviewer = props.actor.roles.includes('REVIEWER')
@@ -24,14 +26,19 @@ const discharge = ref({ patientId: 0, reference: '', careDate: '' })
 const doc = ref({ documentId: 0, title: '', text: '' })
 const selectedFile = ref<File>()
 const fileKey = ref(0)
+const visits = ref<Revisit[]>([])
+const slots = ref<Slot[]>([])
+const revisitSlot = ref(0)
 const draft = ref({ reviewerId: 0, kind: 'REVISIT', title: '', instructions: '', dueAt: '', segmentIds: [] as number[], manualReference: '' })
-const action = ref({ name: '', note: '', newOwnerId: 0, closureReason: 'UNREACHABLE' })
+const action = ref({ name: '', note: '', newOwnerId: 0, closureReason: 'UNREACHABLE', encounterId: 0 })
 const currentDocuments = computed(() => documents.value.filter((row, index, rows) => rows.findIndex((item) => item.id === row.id) === index))
 const active = computed(() => !!detail.value && ['DISPATCHED', 'PATIENT_REPLIED'].includes(detail.value.status))
 const canEdit = computed(() => !!detail.value && ['DRAFT', 'APPROVED'].includes(detail.value.status) && detail.value.ownerId === props.actor.id)
 const canManage = computed(() => !!detail.value && !['VERIFIED', 'CLOSED'].includes(detail.value.status) && detail.value.ownerId === props.actor.id)
 const canReview = computed(() => !!detail.value && reviewer && detail.value.reviewerId === props.actor.id)
 const sourceVersion = computed(() => episodes.value.find((item) => item.id === episodeId.value)?.sourceVersion ?? 0)
+const allowRevisit = computed(() => patient && active.value && !visits.value.some((item) =>
+  ['BOOKED', 'CHECKED_IN', 'IN_CONSULT', 'COMPLETED', 'STOPPED'].includes(item.status)))
 
 async function refresh() {
   tasks.value = await api<Followup[]>('/followups')
@@ -54,6 +61,7 @@ async function run(write: () => Promise<unknown>, message: string) {
 }
 
 async function chooseEpisode(id: number) {
+  if (episodeId.value !== id) draft.value.segmentIds = []
   episodeId.value = id
   if (!id) { documents.value = []; sources.value = []; return }
   try {
@@ -96,7 +104,15 @@ function addDocument() {
 async function showTask(id: number) {
   error.value = ''
   action.value.name = ''
-  try { detail.value = await api<Followup>(`/followups/${id}`) }
+  action.value.encounterId = 0
+  try {
+    const current = await api<Followup>(`/followups/${id}`)
+    detail.value = current
+    visits.value = current.kind === 'REVISIT' ? await api<Revisit[]>(`/followups/${id}/appointments`) : []
+    slots.value = current.kind === 'REVISIT' && allowRevisit.value
+      ? (await api<Schedule>('/schedule')).slots.filter((item) => !item.stoppedAt && item.remaining > 0) : []
+    revisitSlot.value = slots.value[0]?.id ?? 0
+  }
   catch (failure) { error.value = (failure as Error).message }
 }
 
@@ -142,16 +158,26 @@ function apply(name: string) {
   if (!item) return
   return run(async () => {
     await mutate(`/followups/${item.id}/actions`, { action: name, version: item.version, note: action.value.note || null,
-      newOwnerId: action.value.newOwnerId || null, closureReason: name === 'CLOSE' ? action.value.closureReason : null })
+      newOwnerId: action.value.newOwnerId || null, closureReason: name === 'CLOSE' ? action.value.closureReason : null,
+      encounterId: name === 'VERIFY' ? action.value.encounterId || null : null })
     action.value.note = ''
     if (name === 'TRANSFER') detail.value = undefined
     else await showTask(item.id)
   }, '随访已更新。')
 }
 
+function bookRevisit(id: number) {
+  return run(async () => {
+    await mutate(`/followups/${id}/appointments`, { slotId: revisitSlot.value }, { 'Idempotency-Key': crypto.randomUUID() })
+    await showTask(id)
+    emit('booked')
+  }, '复诊预约已关联到此随访。')
+}
+
 onMounted(async () => {
   try { await refresh() } catch (failure) { error.value = (failure as Error).message }
 })
+watch(() => props.refreshVersion, () => { if (detail.value) void showTask(detail.value.id) })
 </script>
 
 <template>
@@ -214,7 +240,22 @@ onMounted(async () => {
       <p v-if="detail.manualReference">手工依据 · {{ detail.manualReference }}</p>
       <ul v-if="detail.sources.length" class="source-list"><li v-for="item in detail.sources" :key="item.id"><a :href="`/api/v1/episodes/${detail.episodeId}/versions/${item.versionId}/download`">{{ item.title }} · 版本 {{ item.versionNumber }}</a><span v-if="item.pageNumber"> · 第 {{ item.pageNumber }} 页</span> · 第 {{ item.lineNumber }} 行 · {{ item.excerpt }}</li></ul>
       <ul v-if="detail.reviews.length" class="source-list"><li v-for="item in detail.reviews" :key="item.id">{{ item.decision === 'APPROVED' ? '审核通过' : '退回修改' }}{{ item.reason ? ` · ${item.reason}` : '' }}</li></ul>
-      <ul v-if="detail.feedback.length" class="source-list"><li v-for="item in detail.feedback" :key="item.id">{{ feedbackKinds[item.kind] }} · {{ item.actor }} · {{ shanghaiTime(item.createdAt) }} · {{ item.detail }}</li></ul>
+      <ul v-if="detail.feedback.length" class="source-list"><li v-for="item in detail.feedback" :key="item.id">{{ feedbackKinds[item.kind] }} · {{ item.actor }} · {{ shanghaiTime(item.createdAt) }} · {{ item.detail }}<span v-if="item.sourceEncounterId"> · 接诊 #{{ item.sourceEncounterId }}</span></li></ul>
+      <section v-if="detail.kind === 'REVISIT'" class="panel" aria-label="复诊预约记录">
+        <h4>复诊预约记录</h4>
+        <p v-if="!visits.length">暂无关联预约。</p>
+        <ul class="record-list">
+          <li v-for="item in visits" :key="item.appointmentId" class="record" :data-revisit-appointment="item.appointmentId">
+            <div><strong>{{ appointmentStates[item.status] }} · {{ shanghaiTime(item.startsAt) }}</strong><div>{{ item.department }} · {{ item.doctor }}</div><div v-if="item.completedAt">接诊完成 · {{ shanghaiTime(item.completedAt) }}</div></div>
+          </li>
+        </ul>
+        <p v-if="patient && visits.some((item) => item.status === 'STOPPED')">请从“我的预约”处理停诊记录并重新选号。</p>
+        <form v-if="allowRevisit && slots.length" class="field-grid" @submit.prevent="bookRevisit(detail.id)">
+          <label>复诊时段<select v-model.number="revisitSlot" required><option v-for="item in slots" :key="item.id" :value="item.id">{{ shanghaiTime(item.startsAt) }} · {{ item.department }} · {{ item.doctorName }}</option></select></label>
+          <button :disabled="busy">预约复诊</button>
+        </form>
+        <p v-else-if="allowRevisit">暂无可预约的复诊号源。</p>
+      </section>
       <div class="row-actions">
         <button v-if="canEdit" type="button" class="secondary" @click="edit(detail)">编辑草稿</button>
         <button v-if="canEdit && detail.status === 'DRAFT'" type="button" :disabled="busy" @click="apply('SUBMIT')">提交审核</button>
@@ -228,6 +269,7 @@ onMounted(async () => {
         <button v-if="canManage" type="button" class="secondary" @click="action.name = 'CLOSE'">人工结案</button>
       </div>
       <form v-if="action.name" class="field-grid" @submit.prevent="apply(action.name)">
+        <label v-if="action.name === 'VERIFY' && visits.some((item) => item.completedAt)">核实依据<select v-model.number="action.encounterId"><option :value="0">人工核实记录</option><option v-for="item in visits.filter((row) => row.completedAt)" :key="item.appointmentId" :value="item.encounterId">接诊 #{{ item.encounterId }} · {{ shanghaiTime(item.completedAt!) }}</option></select></label>
         <label v-if="action.name === 'TRANSFER'">接手人<select v-model.number="action.newOwnerId" required><option :value="0">选择接手人</option><option v-for="item in directory.owners.filter((item) => item.id !== actor.id)" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
         <label v-if="action.name === 'CLOSE'">结案原因<select v-model="action.closureReason"><option value="UNREACHABLE">无法联系</option><option value="REFUSED">患者拒绝</option><option value="WRONG_TASK">任务录错</option></select></label>
         <label>{{ action.name === 'FEEDBACK' ? '反馈内容' : '处理依据' }}<textarea v-model.trim="action.note" maxlength="2000" required /></label>
