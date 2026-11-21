@@ -175,7 +175,8 @@ test('AC-10–12 OIDC MFA, scoped handoff and API replica failover', async ({ br
   expect((await post(admin.api, staffPath, { ...staffInput, enabled: false })).status()).toBe(204)
   try {
     expect((await owner.api.get('/api/v1/session')).status()).toBe(401)
-    const queue = await (await admin.api.get('/api/v1/admin/assignments?departmentId=' + department)).json()
+    const cursor = task > 1 ? '&afterId=' + (task - 1) : ''
+    const queue = await (await admin.api.get('/api/v1/admin/assignments?departmentId=' + department + cursor)).json()
     expect(queue.assignments).toEqual(expect.arrayContaining([expect.objectContaining({ id: task, ownerUnavailable: true })]))
     expect((await post(admin.api, '/admin/followups/' + task + '/reassign', { ownerId: newOwner })).status()).toBe(204)
     expect((await replacement.api.get(documents)).status()).toBe(200)
@@ -213,10 +214,13 @@ test('AC-11 hotspot consumes only the available seats', async ({ browser }) => {
   const sessions: { api: APIRequestContext; headers: Record<string, string> }[] = []
   try {
     for (let first = 1; first <= count; first += 10) {
+      const started = Date.now()
       sessions.push(...await Promise.all(Array.from({ length: Math.min(10, count - first + 1) }, async (_, index) => {
         const api = await patient(first + index, password)
         return { api, headers: { ...await csrf(api), 'Idempotency-Key': randomUUID() } }
       })))
+      const spacing = 350 - (Date.now() - started)
+      if (spacing > 0) await new Promise((done) => setTimeout(done, spacing))
     }
     const booked = await Promise.all(sessions.map(({ api, headers }) =>
       api.post('/api/v1/appointments', { headers, data: { slotId: id } })))
