@@ -1,11 +1,12 @@
-FROM python:3.13.18-slim-trixie AS build
+FROM python:3.13.18-alpine3.24 AS build
 WORKDIR /app
 RUN pip install --no-cache-dir uv==0.13.4
 COPY pyproject.toml uv.lock ./
 RUN uv sync --locked --no-dev
 
-FROM python:3.13.18-slim-trixie
+FROM python:3.13.18-alpine3.24
 WORKDIR /app
+RUN apk upgrade --no-cache && python -m pip uninstall --yes pip
 COPY --from=build /app/.venv ./.venv
 COPY app ./app
 USER 65534:65534

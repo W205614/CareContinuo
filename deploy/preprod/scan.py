@@ -29,6 +29,22 @@ def scan(command, name, directory):
     return counts["high"] + counts["critical"] + counts["secrets"]
 
 
+def scan_api(archive, directory):
+    report_path = directory / "api.cdx.json"
+    docker("run", "--rm", "--mount", f"type=bind,source={directory},target=/reports",
+           "anchore/syft:v1.57.2", "scan", "docker-archive:/reports/" + archive.name,
+           "-o", "cyclonedx-json=/reports/" + report_path.name)
+    inventory = json.loads(report_path.read_text(encoding="utf-8"))
+    libraries = [item for item in inventory.get("components", []) if item.get("purl", "").startswith("pkg:maven/")]
+    if not any(item["name"] == "spring-webmvc" for item in libraries):
+        raise RuntimeError("The image inventory must include the packaged Java libraries")
+    print(f"Packaged Java components: {len(libraries)}", flush=True)
+    findings = scan(["image", "--scanners", "vuln,secret", "--pkg-types", "os",
+                     "--input", "/reports/" + archive.name], "api-platform", directory)
+    return findings + scan(["sbom", "--scanners", "vuln", "--pkg-types", "library",
+                            "/reports/" + report_path.name], "api-libraries", directory)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
@@ -46,8 +62,11 @@ def main():
         image = "carecontinuo-preprod-" + service + ":local"
         archive = directory / (service + ".tar")
         docker("image", "save", "-o", str(archive), image)
-        findings += scan(["image", "--scanners", "vuln,secret", "--input", "/reports/" + archive.name],
-                         service, directory)
+        if service == "api":
+            findings += scan_api(archive, directory)
+        else:
+            findings += scan(["image", "--scanners", "vuln,secret", "--input", "/reports/" + archive.name],
+                             service, directory)
     if findings:
         raise SystemExit(f"{findings} high/critical or secret findings require triage")
 

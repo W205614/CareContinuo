@@ -146,6 +146,20 @@ test('AC-10–12 OIDC MFA, scoped handoff and API replica failover', async ({ br
   })
   expect(oversized.status()).toBe(413)
 
+  const unauthorizedAgent = docker('exec', '-T', 'worker', 'curl', '-s', '-o', '/dev/null', '-w', '%{http_code}',
+    '-H', 'Content-Type: application/json', '--data', '{}', 'http://agent:8000/internal/v1/followup-drafts')
+  expect(unauthorizedAgent.trim()).toBe('401')
+  expect((await post(owner.api, '/episodes/' + episodeId + '/documents', {
+    title: 'Synthetic source', text: '[timeout] Synthetic input within the staff department.',
+  })).status()).toBe(201)
+  const agentJob = await post(owner.api, '/episodes/' + episodeId + '/agent-jobs')
+  expect(agentJob.ok()).toBe(true)
+  const jobPath = '/api/v1/agent-jobs/' + (await agentJob.json()).id
+  await expect.poll(async () => {
+    const response = await owner.api.get(jobPath)
+    return response.ok() ? (await response.json()).failureCode : response.status()
+  }, { timeout: 15_000 }).toBe('MODEL_TIMEOUT')
+
   const created = await post(owner.api, '/followups', {
     episodeId, reviewerId, draft: { kind: 'PENDING_RESULT', title: 'Synthetic follow-up',
       instructions: 'Check synthetic result', dueAt: new Date(Date.now() + 3_600_000).toISOString(),
