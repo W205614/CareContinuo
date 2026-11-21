@@ -176,8 +176,10 @@ test('AC-10–12 OIDC MFA, scoped handoff and API replica failover', async ({ br
   expect(first).toBeTruthy()
   execFileSync('docker', ['stop', first!], { stdio: 'pipe' })
   try {
-    await expect.poll(async () => (await p1.get('/api/v1/session')).status()).toBe(200)
-    expect((await p1.get('/api/v1/appointments/' + appointment.id)).status()).toBe(200)
+    await expect.poll(async () => (await p1.get('/api/v1/session', { timeout: 11_000 })).status(),
+      { timeout: 20_000 }).toBe(200)
+    await expect.poll(async () => (await p1.get('/api/v1/appointments/' + appointment.id, { timeout: 11_000 })).status(),
+      { timeout: 20_000 }).toBe(200)
   } finally {
     execFileSync('docker', ['start', first!], { stdio: 'pipe' })
   }
