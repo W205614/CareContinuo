@@ -6,6 +6,8 @@ import app.carecontinuo.common.Problems;
 import app.carecontinuo.identity.Accounts;
 import app.carecontinuo.identity.Accounts.Actor;
 import app.carecontinuo.notification.Notifications;
+import app.carecontinuo.scheduling.AppointmentWindow;
+import app.carecontinuo.scheduling.Schedule;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
@@ -15,6 +17,7 @@ import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -25,8 +28,10 @@ import org.springframework.transaction.support.TransactionTemplate;
 public class Followups {
     private static final String TASK_SQL = """
             select t.id, t.episode_id, e.patient_id, t.owner_id, t.reviewer_id, t.status,
-                   t.version_number, t.published_revision_id, t.needs_review, e.reference, p.display_name as patient, e.department_id
+                   t.version_number, t.published_revision_id, t.needs_review, e.reference, p.display_name as patient, e.department_id,
+                   owner.display_name as owner_name
             from followup_task t join care_episode e on e.id = t.episode_id join patient p on p.id = e.patient_id
+            join app_user owner on owner.id = t.owner_id
             """;
     private static final String REVISION_SQL = """
             select id, version_number, source_version, task_kind, title, instructions, due_at, manual_reference,
@@ -48,10 +53,12 @@ public class Followups {
     private final Notifications notices;
     private final AuditLog audit;
     private final Clock clock;
+    private final FollowupRequests requests;
+    private final Schedule schedule;
     private final TransactionTemplate transactions;
 
     Followups(JdbcClient jdbc, Episodes episodes, Notifications notices, AuditLog audit,
-              Clock clock, TransactionTemplate transactions, Accounts accounts) {
+              Clock clock, TransactionTemplate transactions, Accounts accounts, FollowupRequests requests, Schedule schedule) {
         this.jdbc = jdbc;
         this.episodes = episodes;
         this.accounts = accounts;
@@ -59,11 +66,17 @@ public class Followups {
         this.audit = audit;
         this.clock = clock;
         this.transactions = transactions;
+        this.requests = requests;
+        this.schedule = schedule;
     }
 
-    public List<View> list(Actor actor) {
+    public List<View> list(Actor actor, boolean actionable) {
         if (actor.has("PATIENT")) {
-            var tasks = jdbc.sql(TASK_SQL + " where e.patient_id = ? and t.published_revision_id is not null order by t.id desc limit 100")
+            var tasks = jdbc.sql(TASK_SQL + (actionable ? """
+                    join followup_revision published on published.id = t.published_revision_id
+                    where e.patient_id = ? and (t.needs_review or t.status in ('DISPATCHED', 'PATIENT_REPLIED'))
+                    order by t.needs_review desc, published.due_at, t.id limit 100
+                    """ : " where e.patient_id = ? and t.published_revision_id is not null order by t.id desc limit 100"))
                     .param(actor.patientId()).query(Task.class).list();
             return tasks.stream().map(task -> view(actor, task, false)).toList();
         }
@@ -78,6 +91,23 @@ public class Followups {
         return tasks.stream().map(task -> view(actor, task, false)).toList();
     }
 
+    History history(Actor actor, Boolean closed, Kind kind, Long afterId) {
+        if (!actor.has("PATIENT")) throw Problems.missing();
+        var rows = jdbc.sql(TASK_SQL + """
+                join followup_revision published on published.id = t.published_revision_id
+                where e.patient_id = :patient
+                  and (cast(:closed as boolean) is null or (t.status in ('CLOSED', 'VERIFIED')) = :closed)
+                  and (cast(:kind as text) is null or published.task_kind = :kind)
+                  and (cast(:cursor as bigint) is null or t.id < :cursor)
+                order by t.id desc limit 51
+                """).param("patient", actor.patientId()).param("closed", closed)
+                .param("kind", kind == null ? null : kind.name()).param("cursor", afterId).query(Task.class).list();
+        return new History(rows.stream().limit(50).map(task -> view(actor, task, false)).toList(),
+                rows.size() > 50 ? rows.get(49).id() : null);
+    }
+
+    record History(List<View> tasks, Long nextCursor) { }
+
     public View get(Actor actor, long id) {
         var task = load(id);
         authorize(actor, task);
@@ -88,6 +118,9 @@ public class Followups {
     RevisitWindow publishedRevisitWindow(Actor actor, long id) {
         var task = load(id);
         authorize(actor, task);
+        if (actor.has("REVIEWER") && actor.id() == task.reviewerId() && task.needsReview()) {
+            return revision(task).revisitWindow();
+        }
         return task.publishedRevisionId() == null ? null : publishedRevision(task).revisitWindow();
     }
 
@@ -95,12 +128,124 @@ public class Followups {
         if (!actor.has("PATIENT")) throw Problems.missing();
         episodes.lock(load(id).episodeId());
         var task = load(id);
-        authorize(actor, task);
+        authorize(accounts.actorById(actor.id()), task);
         requirePublished(task);
         var published = publishedRevision(task);
         if (!published.taskKind().equals("REVISIT")) throw Problems.conflict("此随访事项无需预约复诊。");
         return published.revisitWindow();
     }
+
+    Schedule.RevisitSlotPage revisitSlots(Actor actor, long id, Long appointmentId, Long afterId, Schedule.RevisitFilters filters) {
+        var task = load(id);
+        authorize(actor, task);
+        if (!actor.has("PATIENT")) throw Problems.missing();
+        var revision = publishedRevision(task);
+        if (task.needsReview() || !revision.taskKind().equals("REVISIT")) {
+            throw Problems.conflict("当前随访不能预约复诊。");
+        }
+        Long excluded = null;
+        if (appointmentId != null) {
+            excluded = jdbc.sql("""
+                    select a.slot_id from followup_appointment l join appointment a on a.id = l.appointment_id
+                    where l.task_id = ? and a.id = ? and a.status in ('BOOKED', 'STOPPED')
+                    """).params(id, appointmentId).query(Long.class).optional().orElseThrow(Problems::missing);
+        } else {
+            requirePublished(task);
+        }
+        return schedule.revisitSlots(actor, revision.revisitWindow(), excluded, afterId, filters);
+    }
+
+    @Transactional
+    long submitRequest(Actor actor, long id, FollowupRequests.Input input) {
+        if (!actor.has("PATIENT")) throw Problems.missing();
+        episodes.lock(load(id).episodeId());
+        var task = load(id);
+        authorize(accounts.actorById(actor.id()), task);
+        requirePublished(task);
+        expectVersion(task, input.version());
+        var published = publishedRevision(task);
+        Long appointmentId = null;
+        if (input.category() == FollowupRequests.Category.REVISIT_ASSISTANCE) {
+            if (!published.taskKind().equals("REVISIT")) throw Problems.conflict("此随访事项无需预约复诊。");
+            var activeVisit = jdbc.sql("""
+                    select a.id, a.status, s.starts_at from followup_appointment l join appointment a on a.id = l.appointment_id
+                    join schedule_slot s on s.id = a.slot_id
+                    where l.task_id = ? and a.status in ('BOOKED', 'STOPPED', 'CHECKED_IN', 'IN_CONSULT', 'COMPLETED')
+                    order by a.id desc limit 1
+                    """).param(id).query(ActiveVisit.class).optional().orElse(null);
+            if (activeVisit != null && !List.of("BOOKED", "STOPPED").contains(activeVisit.status())) {
+                throw Problems.conflict("该随访已有就诊记录。");
+            }
+            if (activeVisit != null && activeVisit.status().equals("BOOKED")
+                    && !new AppointmentWindow(activeVisit.startsAt()).acceptsBookingChangesAt(OffsetDateTime.now(clock))) {
+                throw Problems.conflict("原预约已过退改约截止时间。");
+            }
+            appointmentId = activeVisit == null ? null : activeVisit.id();
+            if (input.appointmentId() != null && !input.appointmentId().equals(appointmentId)) throw Problems.missing();
+            var pending = requests.openRevisit(id);
+            if (pending != null) return pending;
+            if (!revisitSlots(actor, id, appointmentId, null, new Schedule.RevisitFilters(null, null, null)).slots().isEmpty()) {
+                throw Problems.conflict("已有符合要求的号源，请刷新并自行预约。");
+            }
+        } else {
+            transition(task, "PATIENT_REPLIED");
+        }
+        long requestId = requests.submit(id, task.ownerId(), input, appointmentId);
+        audit.record(actor.id(), "FOLLOWUP_REQUEST", requestId, "SUBMIT");
+        return requestId;
+    }
+
+    @Transactional
+    void handleRequest(Actor actor, long id, long requestId, FollowupRequests.Handling input) {
+        episodes.lock(load(id).episodeId());
+        var task = load(id);
+        requireOwner(accounts.actorById(actor.id()), task);
+        requirePublished(task);
+        expectVersion(task, input.version());
+        Long reply = requests.handle(id, requestId, actor.id(), task.ownerId(), input);
+        if (reply != null) {
+            notices.enqueueFollowupReply(task.patientId(), task.episodeId(), id, task.publishedRevisionId(),
+                    requestId, reply, OffsetDateTime.now(clock));
+        } else {
+            notices.enqueueFollowupStarted(task.patientId(), task.episodeId(), id, task.publishedRevisionId(),
+                    requestId, OffsetDateTime.now(clock));
+        }
+        audit.record(actor.id(), "FOLLOWUP_REQUEST", requestId, input.action().name());
+    }
+
+    @Transactional
+    void updateResult(Actor actor, long id, ResultInput input) {
+        episodes.lock(load(id).episodeId());
+        var task = load(id);
+        requireOwner(accounts.actorById(actor.id()), task);
+        requirePublished(task);
+        expectVersion(task, input.version());
+        var published = publishedRevision(task);
+        if (!published.taskKind().equals("PENDING_RESULT")) throw Problems.conflict("该随访没有待出检查结果。");
+        String message = input.message() == null || input.message().isBlank() ? null : input.message().strip();
+        if (input.stage() == ResultStage.PLAN_AVAILABLE && message == null) {
+            throw Problems.invalid("请填写患者可见的后续安排。");
+        }
+        String stage = input.stage().name();
+        var latest = jdbc.sql("""
+                select stage, patient_message, created_at from followup_result_update
+                where revision_id = ? order by id desc limit 1
+                """).param(published.id()).query(ResultUpdate.class).optional();
+        if (latest.isPresent() && stage.equals(latest.get().stage())
+                && Objects.equals(message, latest.get().patientMessage())) return;
+        long updateId = jdbc.sql("""
+                insert into followup_result_update(revision_id, actor_id, stage, patient_message)
+                values (?, ?, ?, ?) returning id
+                """).param(published.id()).param(actor.id()).param(stage).param(message).query(Long.class).single();
+        notices.enqueueResultUpdate(task.patientId(), task.episodeId(), id, published.id(), updateId, OffsetDateTime.now(clock));
+        audit.record(actor.id(), "FOLLOWUP", id, input.stage().name());
+    }
+
+    private record ActiveVisit(long id, String status, OffsetDateTime startsAt) { }
+
+    enum ResultStage { CHECKING, PLAN_AVAILABLE }
+    record ResultInput(@Positive int version, @NotNull ResultStage stage, @Size(max = 2000) String message) { }
+    record ResultUpdate(String stage, String patientMessage, OffsetDateTime createdAt) { }
 
     @Transactional
     public long create(Actor actor, long episodeId, long reviewerId, Draft draft) {
@@ -207,8 +352,11 @@ public class Followups {
                 requireOwner(actor, task);
                 requirePublished(task);
                 verify(actor, task, input);
+                requests.finish(task.id(), actor.id(), false);
                 transition(task, "VERIFIED");
                 closeWork(actor, task, "结果已核实");
+                notices.enqueueFollowup(task.patientId(), task.episodeId(), task.id(), task.publishedRevisionId(),
+                        "FOLLOWUP_VERIFIED", "医护已核实随访结果", OffsetDateTime.now(clock));
             }
             case TRANSFER -> transfer(actor, task, input.newOwnerId(), note(input));
             case CLOSE -> {
@@ -217,6 +365,7 @@ public class Followups {
                 if (input.closureReason() == null) throw Problems.invalid("请选择结案原因。");
                 feedback(actor, task, "CLOSURE", input.closureReason().name() + " · " + note(input));
                 transition(task, "CLOSED");
+                requests.finish(task.id(), actor.id(), false);
                 closeWork(actor, task, "人工结案");
             }
         }
@@ -256,6 +405,7 @@ public class Followups {
                     "FOLLOWUP_DUE", "随访安排即将到期", revision.dueAt().minusDays(1));
         }
         notices.closeWork("SOURCE_CHANGED", task.id(), actor.id(), "更正后的版本已派发");
+
     }
 
     public AssignmentPage unassigned(Actor actor, long departmentId, Long afterId) {
@@ -334,8 +484,9 @@ public class Followups {
                   (w.object_id = ? and w.kind in ('FOLLOWUP_OVERDUE', 'SOURCE_CHANGED', 'PATIENT_FEEDBACK', 'FOLLOWUP_TRANSFER'))
                   or (w.kind = 'NOTIFICATION_FAILED' and w.object_id in
                     (select id from outbox_event where episode_id = ? and object_id = ?))
-                  or (w.kind = 'AGENT_CONFLICT' and w.object_id in (select id from agent_job where episode_id = ?)))
-                """).params(owner, task.ownerId(), task.id(), task.episodeId(), task.id(), task.episodeId()).update();
+                  or (w.kind = 'AGENT_CONFLICT' and w.object_id in (select id from agent_job where episode_id = ?))
+                  or (w.kind = 'FOLLOWUP_REQUEST' and w.object_id in (select id from followup_request where task_id = ?)))
+                """).params(owner, task.ownerId(), task.id(), task.episodeId(), task.id(), task.episodeId(), task.id()).update();
         notices.openWork("FOLLOWUP_TRANSFER", task.id(), "FOLLOWUP", owner, OffsetDateTime.now(clock));
     }
 
@@ -381,12 +532,16 @@ public class Followups {
     private View view(Actor actor, Task task, boolean expanded) {
         boolean patient = actor.has("PATIENT");
         var revision = patient ? publishedRevision(task) : revision(task);
-        List<Episodes.Segment> sources = patient || !expanded ? List.of() : jdbc.sql("""
-                select g.id, s.title, v.id as version_id, v.version_number, g.page_number, g.line_number, g.excerpt
-                from followup_revision_source r join document_segment g on g.id = r.segment_id
-                join document_version v on g.version_id = v.id join source_document s on v.document_id = s.id
-                where r.revision_id = ? order by s.id, g.id
-                """).param(revision.id()).query(Episodes.Segment.class).list();
+        List<Episodes.Segment> sources = patient || !expanded ? List.of() : revisionSources(revision.id());
+        Comparison previous = null;
+        if (expanded && !patient && actor.has("REVIEWER") && actor.id() == task.reviewerId()
+                && task.publishedRevisionId() != null && task.publishedRevisionId() != revision.id()) {
+            var published = publishedRevision(task);
+            previous = new Comparison(published.versionNumber(), published.title(), published.taskKind(),
+                    published.revisitDepartment(), published.revisitFrom(), published.revisitTo(),
+                    published.dueAt(), published.instructions(), published.manualReference(),
+                    revisionSources(published.id()));
+        }
         String feedbackSql = """
                 select f.id, f.kind, f.detail, f.created_at, u.display_name as actor, f.source_encounter_id
                 from followup_feedback f join app_user u on u.id = f.actor_id where f.task_id = ?
@@ -398,10 +553,24 @@ public class Followups {
         String instructions = patient && task.needsReview() ? null : revision.instructions();
         String state = patient && task.needsReview() ? "UNDER_CORRECTION" : task.status();
         int version = patient ? revision.versionNumber() : task.versionNumber();
-        return new View(task.id(), task.episodeId(), task.reference(), task.patient(), task.ownerId(), task.reviewerId(),
+        List<ResultUpdate> results = !expanded || !revision.taskKind().equals("PENDING_RESULT") || patient && task.needsReview()
+                ? List.of() : jdbc.sql("""
+                select stage, patient_message, created_at from followup_result_update where revision_id = ? order by id desc
+                """).param(revision.id()).query(ResultUpdate.class).list();
+        return new View(task.id(), task.episodeId(), task.reference(), task.patient(), task.ownerId(), task.ownerName(), task.reviewerId(), task.departmentId(),
                 state, version, task.needsReview(), revision.taskKind(), revision.title(), instructions,
                 revision.dueAt(), revision.revisitFrom(), revision.revisitTo(), revision.revisitDepartmentId(),
-                revision.revisitDepartment(), patient ? null : revision.manualReference(), sources, entries, reviews);
+                revision.revisitDepartment(), patient ? null : revision.manualReference(), sources, entries, reviews,
+                expanded ? requests.history(task.id()) : List.of(), expanded ? requests.replies(task.id()) : List.of(), previous, results);
+    }
+
+    private List<Episodes.Segment> revisionSources(long revisionId) {
+        return jdbc.sql("""
+                select g.id, s.title, v.id as version_id, v.version_number, g.page_number, g.line_number, g.excerpt
+                from followup_revision_source r join document_segment g on g.id = r.segment_id
+                join document_version v on g.version_id = v.id join source_document s on v.document_id = s.id
+                where r.revision_id = ? order by s.id, g.id
+                """).param(revisionId).query(Episodes.Segment.class).list();
     }
 
     private Task load(long id) {
@@ -476,16 +645,21 @@ public class Followups {
                         LocalDate revisitFrom, LocalDate revisitTo, @Positive Long revisitDepartmentId) { }
     public record ActionInput(@NotNull Action action, @Positive int version, @Size(max = 2000) String note,
                               @Positive Long newOwnerId, ClosureReason closureReason, @Positive Long encounterId) { }
-    public record View(long id, long episodeId, String reference, String patient, long ownerId, long reviewerId,
+    public record View(long id, long episodeId, String reference, String patient, long ownerId, String ownerName, long reviewerId, long departmentId,
                        String status, int version, boolean needsReview, String kind, String title, String instructions,
                        OffsetDateTime dueAt, LocalDate revisitFrom, LocalDate revisitTo, Long revisitDepartmentId,
                        String revisitDepartment, String manualReference, List<Episodes.Segment> sources,
-                       List<Feedback> feedback, List<Review> reviews) { }
+                       List<Feedback> feedback, List<Review> reviews, List<FollowupRequests.View> requests,
+                       List<FollowupRequests.Reply> replies, Comparison previous, List<ResultUpdate> resultUpdates) { }
+    public record Comparison(int version, String title, String kind, String revisitDepartment,
+                             LocalDate revisitFrom, LocalDate revisitTo,
+                             OffsetDateTime dueAt, String instructions, String manualReference,
+                             List<Episodes.Segment> sources) { }
     public record Feedback(long id, String kind, String detail, OffsetDateTime createdAt, String actor,
                            Long sourceEncounterId) { }
     public record Review(long id, String decision, String reason, OffsetDateTime createdAt) { }
     private record Task(long id, long episodeId, long patientId, long ownerId, long reviewerId, String status,
-                        int versionNumber, Long publishedRevisionId, boolean needsReview, String reference, String patient, long departmentId) { }
+                        int versionNumber, Long publishedRevisionId, boolean needsReview, String reference, String patient, long departmentId, String ownerName) { }
     private record Revision(long id, int versionNumber, int sourceVersion, String taskKind, String title,
                             String instructions, OffsetDateTime dueAt, String manualReference, LocalDate revisitFrom,
                             LocalDate revisitTo, Long revisitDepartmentId, String revisitDepartment) {

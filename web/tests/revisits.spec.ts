@@ -1,10 +1,11 @@
-import { shanghaiDate } from '../src/time'
+import { shanghaiDate, shanghaiTime } from '../src/time'
 import { expect, test } from '@playwright/test'
 import { randomUUID } from 'node:crypto'
 import { createSlot, get, loginInBrowser, post, runSql, seedBookedAppointment, signedIn } from './fixtures'
 
 test('AC-01 and AC-07 patient can rebook and staff can verify an actual consultation', async ({ browser }) => {
-  const [owner, reviewer, patient, other, ops] = await Promise.all(['followup', 'doctor', 'patient-a', 'patient-b', 'operations'].map(signedIn))
+  test.setTimeout(90_000)
+  const [owner, patient, other, ops] = await Promise.all(['followup', 'patient-a', 'patient-b', 'operations'].map(signedIn))
   const directory = (await (await get(owner, '/care-directory')).json())
   const { id: episodeId } = await (await post(owner, '/episodes', { patientId: directory.patients[0].id,
     reference: `REVISIT-${randomUUID()}`, careDate: new Date().toISOString().slice(0, 10) })).json()
@@ -38,12 +39,16 @@ test('AC-01 and AC-07 patient can rebook and staff can verify an actual consulta
   await expect(staffPage.locator('.followup-detail')).toContainText('待审核')
   const list = await (await get(owner, '/followups')).json()
   const taskId = list.find((row: { episodeId: number }) => row.episodeId === episodeId).id
-  for (const action of ['APPROVE', 'DISPATCH']) {
-    expect((await post(reviewer, `/followups/${taskId}/actions`, { action, version: 1 })).status()).toBe(204)
-  }
+  const doctorPage = await browser.newPage()
+  await loginInBrowser(doctorPage, 'doctor')
+  await doctorPage.locator(`a[href="/workspace?followup=${taskId}"]`).click()
+  const review = doctorPage.locator('.followup-detail')
+  await review.getByRole('button', { name: '审核通过', exact: true }).click()
+  await review.getByRole('button', { name: '派发随访' }).click()
+  await expect(review).toContainText('已派发')
 
   expect((await post(other, `/followups/${taskId}/appointments`, { slotId: firstSlot }, randomUUID())).status()).toBe(404)
-  const patientPage = await browser.newPage()
+  const patientPage = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true })
   await loginInBrowser(patientPage, 'patient-a')
   await patientPage.locator(`[data-followup-id="${taskId}"]`).getByRole('button', { name: '查看随访' }).click()
   const detail = patientPage.locator('.followup-detail')
@@ -52,7 +57,8 @@ test('AC-01 and AC-07 patient can rebook and staff can verify an actual consulta
   await expect(detail.locator('[data-revisit-appointment]')).toContainText('已预约')
   const visits = async () => (await get(patient, `/followups/${taskId}/appointments`)).json()
   const first = (await visits())[0].appointmentId as number
-  await patientPage.locator(`[data-appointment-id="${first}"]`).getByRole('button', { name: '取消预约' }).click()
+  await patientPage.locator(`[data-appointment-id="${first}"]`).getByRole('button', { name: '取消预约', exact: true }).click()
+  await patientPage.locator(`[data-appointment-id="${first}"]`).getByRole('button', { name: '确认取消预约' }).click()
   await expect(detail.locator(`[data-revisit-appointment="${first}"]`)).toContainText('已取消')
   expect((await (await get(patient, `/followups/${taskId}`)).json()).status).toBe('DISPATCHED')
 
@@ -64,18 +70,43 @@ test('AC-01 and AC-07 patient can rebook and staff can verify an actual consulta
   expect((await (await post(patient, bookPath, { slotId: secondSlot }, key)).json()).id).toBe(second)
   expect((await post(patient, bookPath, { slotId: moveSlot }, randomUUID())).status()).toBe(409)
   const moved = (await (await post(patient, `/appointments/${second}/reschedule`, { slotId: moveSlot }, randomUUID())).json()).id as number
-  expect((await post(ops, `/schedule-slots/${moveSlot}/stop`, { reason: '合成复诊停诊' })).status()).toBe(204)
-  const final = (await (await post(patient, `/appointments/${moved}/reschedule`, { slotId: finalSlot }, randomUUID())).json()).id as number
+  const opsPage = await browser.newPage()
+  await loginInBrowser(opsPage, 'operations')
+  await opsPage.locator(`[data-schedule-id="${moveSlot}"]`).getByRole('button', { name: '停诊', exact: true }).click()
+  const preview = opsPage.getByRole('region', { name: '停诊影响预览' })
+  await expect(preview).toContainText('可能影响 1 笔预约')
+  await preview.getByLabel('停诊原因').fill('合成复诊停诊')
+  await preview.getByRole('button', { name: '确认停诊' }).click()
+  await expect(opsPage.locator(`[data-appointment-id="${moved}"]`)).toContainText('停诊待处理')
+
+  await patientPage.goto('/workspace')
+  const home = patientPage.getByRole('region', { name: '需要我处理的事' })
+  await home.locator(`a[href="/workspace?appointment=${moved}"]`).click()
+  const stopped = patientPage.locator(`[data-appointment-id="${moved}"]`)
+  await stopped.getByRole('button', { name: '改约', exact: true }).click()
+  await patientPage.getByRole('region', { name: '选择新的时段' }).getByRole('listitem')
+    .filter({ hasText: shanghaiTime(finalSlotDetails.startsAt) }).getByRole('button', { name: '确认改约' }).click()
+  await expect(patientPage.getByRole('status').filter({ hasText: '改约已确认' })).toBeVisible()
   const history = await visits()
+  const final = history[0].appointmentId as number
+  await expect(patientPage).toHaveURL(new RegExp(`appointment=${final}$`))
   expect(history.map((row: { status: string }) => row.status)).toEqual(['BOOKED', 'RESCHEDULED', 'RESCHEDULED', 'CANCELLED'])
   expect(history[0].supersedesId).toBe(moved)
 
   expect((await post(patient, `/followups/${taskId}/actions`, { action: 'FEEDBACK', version: 1, note: '患者自述已复查' })).status()).toBe(204)
   expect((await (await get(patient, `/followups/${taskId}`)).json()).status).toBe('PATIENT_REPLIED')
   runSql(`update schedule_slot set starts_at = now() + interval '2 minutes', ends_at = now() + interval '1 hour' where id = ${finalSlot};`)
-  expect((await post(patient, `/appointments/${final}/check-in`)).status()).toBe(204)
-  expect((await post(reviewer, `/appointments/${final}/start`)).status()).toBe(204)
-  expect((await post(reviewer, `/appointments/${final}/complete`, { note: '合成复诊接诊完成' })).status()).toBe(204)
+  await patientPage.reload()
+  const newBooking = patientPage.locator(`[data-appointment-id="${final}"]`)
+  await newBooking.getByRole('button', { name: '签到', exact: true }).click()
+  await expect(newBooking).toContainText('已签到')
+  await doctorPage.goto(`/workspace?appointment=${final}`)
+  const encounter = doctorPage.locator(`[data-appointment-id="${final}"]`)
+  await encounter.getByRole('button', { name: '开始接诊' }).click()
+  await encounter.getByRole('button', { name: '录入接诊结果' }).click()
+  await encounter.getByLabel('模拟接诊记录').fill('合成复诊接诊完成')
+  await encounter.getByRole('button', { name: '确认完成' }).click()
+  await expect(encounter).toContainText('已完成')
   const completed = (await visits())[0]
   expect(completed.completedAt).toBeTruthy()
   await staffPage.locator(`[data-followup-id="${taskId}"]`).getByRole('button', { name: '查看随访' }).click()
@@ -89,8 +120,13 @@ test('AC-01 and AC-07 patient can rebook and staff can verify an actual consulta
   const confirmed = await (await get(patient, `/followups/${taskId}`)).json()
   expect(confirmed.feedback.map((row: { kind: string }) => row.kind)).toEqual(['PATIENT', 'VERIFICATION'])
   expect(confirmed.feedback[1].sourceEncounterId).toBe(completed.encounterId)
-  await staffPage.close()
-  await patientPage.close()
+  await expect.poll(async () => (await (await get(patient, '/inbox/followup-progress')).json())
+    .some((item: { kind: string; objectId: number }) => item.kind === 'FOLLOWUP_VERIFIED' && item.objectId === taskId)).toBe(true)
+  await patientPage.goto('/workspace')
+  const progress = home.locator(`[data-progress-task="${taskId}"]`).filter({ hasText: '医护已核实随访结果' })
+  await progress.getByRole('button', { name: '查看随访进展' }).click()
+  await expect(detail).toContainText('医护已核实')
+  await Promise.all([staffPage, patientPage, doctorPage, opsPage].map(page => page.close()))
 })
 
 test('completed outpatient visit hands off its own return plan', async () => {

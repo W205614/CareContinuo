@@ -10,10 +10,12 @@ import org.springframework.stereotype.Component;
 public class RevisitScheduling {
     private final JdbcClient jdbc;
     private final Episodes episodes;
+    private final FollowupRequests requests;
 
-    RevisitScheduling(JdbcClient jdbc, Episodes episodes) {
+    RevisitScheduling(JdbcClient jdbc, Episodes episodes, FollowupRequests requests) {
         this.jdbc = jdbc;
         this.episodes = episodes;
+        this.requests = requests;
     }
 
     // Linked appointments are visible only after the original booking transaction commits.
@@ -32,6 +34,11 @@ public class RevisitScheduling {
                 """).param(appointmentId).query(LinkedPlan.class).single();
         if (linked.needsReview()) throw Problems.conflict("随访安排正在复核，可取消原预约，待更正版派发后再改约。");
         return new RevisitWindow(linked.revisitFrom(), linked.revisitTo(), linked.revisitDepartmentId());
+    }
+
+    public void completeAssistance(long appointmentId, long actorId) {
+        jdbc.sql("select task_id from followup_appointment where appointment_id = ?").param(appointmentId)
+                .query(Long.class).optional().ifPresent(taskId -> requests.finish(taskId, actorId, true));
     }
 
     private record LinkedPlan(boolean needsReview, LocalDate revisitFrom, LocalDate revisitTo, Long revisitDepartmentId) { }

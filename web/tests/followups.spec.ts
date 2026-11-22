@@ -112,6 +112,7 @@ test('AC-08 an overdue task can be transferred and closed with its history', asy
 })
 
 test('AC-06 failed station delivery reaches the owner and manual retry delivers once', async () => {
+  test.setTimeout(60_000)
   const [owner, reviewer, patient, ops, replacement] = await Promise.all(
     ['followup', 'doctor', 'patient-a', 'operations', 'followup-b'].map(signedIn))
   const { episodeId, reviewerId, secondOwner } = await setup(owner)
@@ -216,7 +217,8 @@ test('source correction closes old work and the newly published version can beco
   expect(new Date((await overdue()).dueAt).getTime()).toBeGreaterThan(new Date(old.dueAt).getTime())
 })
 
-test('operations can retry a shared scheduling notification', async () => {
+test('operations can retry a shared scheduling notification', async ({ page }) => {
+  test.setTimeout(60_000)
   const [operator, patient] = await Promise.all(['operations', 'patient-a'].map(signedIn))
   const slot = await createSlot(operator, 180)
   const booked = await book(patient, slot)
@@ -231,6 +233,38 @@ test('operations can retry a shared scheduling notification', async () => {
   expect((await (await get(operator, '/work-items')).json())).toEqual(expect.arrayContaining([
     expect.objectContaining({ id, status: 'OPEN' }),
   ]))
-  expect((await post(operator, '/work-items/' + id + '/retry')).status()).toBe(204)
-  await expect.poll(() => runSql('select state from outbox_event where id = ' + event)).toBe('SENT')
+  expect((await get(operator, '/appointments/' + appointment)).status()).toBe(404)
+  await loginInBrowser(page, 'operations')
+  const pending = page.getByRole('region', { name: '工作待办' }).getByRole('listitem')
+    .filter({ hasText: '通知发送失败' })
+  await expect(pending.getByRole('button', { name: '补发消息' })).toBeVisible()
+  await expect(pending.getByRole('link', { name: '打开处理' })).toHaveCount(0)
+  const itemPath = '/work-items/' + id
+  expect((await get(patient, itemPath)).status()).toBe(404)
+  expect((await (await get(operator, itemPath)).json()).deliveryStatus).toBe('FAILED')
+  const trigger = 'synthetic_manual_retry_' + event
+  runSql(`
+    create function ${trigger}() returns trigger language plpgsql as $$
+    begin
+      if new.event_id = ${event} then raise exception 'Controlled manual retry failure'; end if;
+      return new;
+    end; $$;
+    create trigger ${trigger} before insert on inbox_message for each row execute function ${trigger}();
+  `)
+  try {
+    await pending.getByRole('button', { name: '补发消息' }).click()
+    await expect(pending.getByRole('status')).toHaveText('已提交补发，等待投递')
+    await expect(pending.getByRole('button', { name: '补发消息' })).toHaveCount(0)
+    await expect.poll(() => Number(runSql(`select attempts from outbox_event where id = ${event}`))).toBeGreaterThan(0)
+    runSql(`update outbox_event set attempts = 3, available_at = now() where id = ${event};`)
+    await expect(pending.getByRole('status')).toHaveText('补发失败', { timeout: 12_000 })
+    expect((await (await get(operator, itemPath)).json()).deliveryStatus).toBe('RETRY_FAILED')
+  } finally {
+    runSql(`drop trigger ${trigger} on inbox_message; drop function ${trigger}();`)
+  }
+  await pending.getByRole('button', { name: '补发消息' }).click()
+  await expect(page.getByRole('region', { name: '工作待办' }).getByRole('status').filter({ hasText: '消息已生成' })).toBeVisible()
+  await expect(pending).toHaveCount(0)
+  expect((await (await get(operator, itemPath)).json()).deliveryStatus).toBe('SENT')
+  expect(runSql(`select count(*) from inbox_message where event_id = ${event}`)).toBe('1')
 })

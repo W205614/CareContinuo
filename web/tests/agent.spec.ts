@@ -52,6 +52,11 @@ test('AC-05 and AC-09 Agent conflict cites both authorized documents and prevent
   await loginInBrowser(page, 'followup')
   await page.getByLabel('诊疗记录').selectOption(String(e.id))
   await expect(page.getByText('同一随访的复诊日期不一致')).toBeVisible()
+  await page.getByRole('button', { name: '定位原文 · 安排 2099-12-06 门诊复诊' }).click()
+  const source = page.getByRole('dialog', { name: '原文定位' })
+  await expect(source).toContainText('补充记录 · 版本 1')
+  await expect(source.locator('mark')).toHaveText('安排 2099-12-06 门诊复诊')
+  await source.getByRole('button', { name: '关闭' }).click()
 })
 
 test('AC-06 a late result cannot replace new source and Agent failures preserve manual drafts', async () => {

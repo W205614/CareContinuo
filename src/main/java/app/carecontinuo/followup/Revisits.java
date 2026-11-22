@@ -3,6 +3,7 @@ package app.carecontinuo.followup;
 import app.carecontinuo.audit.AuditLog;
 import app.carecontinuo.common.Problems;
 import app.carecontinuo.identity.Accounts.Actor;
+import app.carecontinuo.scheduling.AppointmentWindow;
 import app.carecontinuo.scheduling.Appointments;
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -16,12 +17,14 @@ class Revisits {
     private final Followups followups;
     private final Appointments appointments;
     private final AuditLog audit;
+    private final FollowupRequests requests;
 
-    Revisits(JdbcClient jdbc, Followups followups, Appointments appointments, AuditLog audit) {
+    Revisits(JdbcClient jdbc, Followups followups, Appointments appointments, AuditLog audit, FollowupRequests requests) {
         this.jdbc = jdbc;
         this.followups = followups;
         this.appointments = appointments;
         this.audit = audit;
+        this.requests = requests;
     }
 
     @Transactional
@@ -37,6 +40,7 @@ class Revisits {
         if (alreadyLinked) return booked;
         if (alreadyHasVisit) throw Problems.conflict("已有有效复诊预约，请通过原预约退改约。");
         jdbc.sql("insert into followup_appointment(task_id, appointment_id) values (?, ?)").params(taskId, booked.id()).update();
+        requests.finish(taskId, actor.id(), true);
         audit.record(actor.id(), "FOLLOWUP", taskId, "BOOK_REVISIT");
         return booked;
     }
@@ -55,12 +59,14 @@ class Revisits {
                     boolean needsReschedule = window != null && List.of("BOOKED", "STOPPED").contains(row.status())
                             && !window.matches(row.startsAt(), row.departmentId());
                     return new LinkedVisit(row.appointmentId(), row.supersedesId(), row.status(), row.startsAt(),
-                            row.doctor(), row.department(), row.encounterId(), row.completedAt(), needsReschedule);
+                            row.doctor(), row.department(), row.encounterId(), row.completedAt(), needsReschedule,
+                            new AppointmentWindow(row.startsAt()).bookingChangesCloseAt());
                 }).toList();
     }
 
     private record Visit(long appointmentId, Long supersedesId, String status, OffsetDateTime startsAt, String doctor,
                          long departmentId, String department, Long encounterId, OffsetDateTime completedAt) { }
     record LinkedVisit(long appointmentId, Long supersedesId, String status, OffsetDateTime startsAt, String doctor,
-                       String department, Long encounterId, OffsetDateTime completedAt, boolean needsReschedule) { }
+                       String department, Long encounterId, OffsetDateTime completedAt, boolean needsReschedule,
+                       OffsetDateTime bookingChangesCloseAt) { }
 }

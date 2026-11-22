@@ -4,6 +4,7 @@ import app.carecontinuo.identity.Accounts;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.Size;
 import java.security.Principal;
@@ -63,6 +64,16 @@ class ScheduleController {
         return schedule.createSlot(accounts.actor(principal), input);
     }
 
+    @PostMapping("/schedule-slots/stop-preview")
+    List<Appointments.StopImpact> previewStop(Principal principal, @Valid @RequestBody StopSelection input) {
+        return appointments.previewStop(accounts.actor(principal), input.slotIds());
+    }
+
+    @PostMapping("/schedule-slots/stop-batch")
+    List<Appointments.StopResult> stopBatch(Principal principal, @Valid @RequestBody StopBatch input) {
+        return appointments.stopSelection(accounts.actor(principal), input.slotIds(), input.reason().strip());
+    }
+
     @PostMapping("/schedule-slots/{id}/stop")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     void stop(Principal principal, @PathVariable long id, @Valid @RequestBody Reason input) {
@@ -70,8 +81,41 @@ class ScheduleController {
     }
 
     @GetMapping("/appointments")
-    List<Appointments.Appointment> list(Principal principal) {
-        return appointments.list(accounts.actor(principal));
+    List<Appointments.Appointment> list(Principal principal, @RequestParam(defaultValue = "false") boolean actionable) {
+        return appointments.list(accounts.actor(principal), actionable);
+    }
+
+    @GetMapping("/appointments/history")
+    Appointments.AppointmentPage appointmentHistory(Principal principal, @RequestParam(required = false) String status,
+                                                    @RequestParam(required = false) @Positive Long afterId) {
+        return appointments.history(accounts.actor(principal), status, afterId);
+    }
+
+    @GetMapping("/appointments/stopped")
+    List<Appointments.StopFollowup> stopped(Principal principal, @RequestParam(defaultValue = "false") boolean processed,
+                                           @RequestParam(required = false) Long appointmentId) {
+        return appointments.stopped(accounts.actor(principal), processed, appointmentId);
+    }
+
+    @GetMapping("/appointments/{id}/callback-status")
+    Appointments.CallbackProgress callbackProgress(Principal principal, @PathVariable long id) {
+        return appointments.callbackProgress(accounts.actor(principal), id);
+    }
+
+    @GetMapping("/appointments/{id}/stop-contacts")
+    List<Appointments.StopContact> stopContacts(Principal principal, @PathVariable long id) {
+        return appointments.stopContacts(accounts.actor(principal), id);
+    }
+
+    @GetMapping("/appointments/{id}/stop-callback-assignees")
+    List<Appointments.CallbackAssignee> callbackAssignees(Principal principal, @PathVariable long id) {
+        return appointments.callbackAssignees(accounts.actor(principal), id);
+    }
+
+    @PostMapping("/appointments/{id}/stop-contacts")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    void stopContact(Principal principal, @PathVariable long id, @Valid @RequestBody Appointments.StopContactInput input) {
+        appointments.addStopContact(accounts.actor(principal), id, input);
     }
 
     @GetMapping("/appointments/{id}")
@@ -121,6 +165,9 @@ class ScheduleController {
         appointments.correct(accounts.actor(principal), id, input.reason().strip());
     }
 
+    record StopSelection(@NotNull @Size(min = 1, max = 20) List<@NotNull @Positive Long> slotIds) { }
+    record StopBatch(@NotNull @Size(min = 1, max = 20) List<@NotNull @Positive Long> slotIds,
+                     @NotBlank @Size(max = 400) String reason) { }
     record Reason(@NotBlank @Size(max = 400) String reason) { }
     record Book(@Positive long slotId) { }
     record Complete(@NotBlank @Size(max = 4000) String note, @Size(max = 2000) String returnPlan) { }

@@ -1,6 +1,7 @@
 package app.carecontinuo.scheduling;
 
 import app.carecontinuo.common.Problems;
+import app.carecontinuo.followup.RevisitWindow;
 import app.carecontinuo.identity.Accounts;
 import app.carecontinuo.identity.Accounts.Actor;
 import jakarta.validation.constraints.Max;
@@ -9,6 +10,7 @@ import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.Size;
 import java.time.Clock;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.List;
 import org.springframework.dao.DuplicateKeyException;
@@ -17,11 +19,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
-class Schedule {
+public class Schedule {
     static final String SLOT_VIEW = """
             select s.id, s.doctor_id, d.display_name as doctor_name, p.name as department,
                    d.user_id as doctor_user_id, p.id as department_id, s.starts_at, s.ends_at, s.capacity,
-                   s.remaining, s.stopped_at, s.stop_reason, p.enabled and u.enabled
+                   s.remaining, s.stopped_at, s.stop_reason, s.visit_location, s.preparation, p.enabled and u.enabled
                        and exists(select 1 from user_role r where r.user_id = u.id and r.role = 'DOCTOR') as available,
                    exists(select 1 from staff_department sd where sd.user_id = u.id
                           and sd.department_id = s.department_id) as doctor_in_department
@@ -39,6 +41,11 @@ class Schedule {
             and exists(select 1 from user_role r where r.user_id = u.id and r.role = 'DOCTOR')
             and (:demo or exists(select 1 from staff_department sd where sd.user_id = u.id
                                 and sd.department_id = s.department_id))
+            """;
+    private static final String REVISIT_WINDOW = BOOKABLE + """
+            and (cast(:excluded as bigint) is null or s.id <> :excluded)
+            and (cast(:department as bigint) is null or s.department_id = :department
+                and (s.starts_at at time zone 'Asia/Shanghai')::date between :first and :last)
             """;
     private final Clock clock;
     private final Accounts accounts;
@@ -80,6 +87,53 @@ class Schedule {
         var rows = query.query(Slot.class).list();
         return new SlotPage(rows.stream().limit(50).toList(), rows.size() > 50 ? rows.get(49).id() : null);
     }
+
+    public RevisitSlotPage revisitSlots(Actor actor, RevisitWindow window, Long excludedSlot, Long afterId,
+                                        RevisitFilters filters) {
+        var rows = scopedRevisit(SLOT_VIEW + " where " + REVISIT_WINDOW + """
+                and s.remaining > 0
+                and (cast(:cursor as bigint) is null or (s.starts_at, s.id) >
+                    ((select starts_at from schedule_slot where id = :cursor), :cursor))
+                and (cast(:date as date) is null or (s.starts_at at time zone 'Asia/Shanghai')::date = :date)
+                and (cast(:doctor as text) is null or strpos(lower(d.display_name), lower(:doctor)) > 0)
+                and (cast(:period as text) is null or
+                    ((s.starts_at at time zone 'Asia/Shanghai')::time < time '12:00') = (:period = 'AM'))
+                order by s.starts_at, s.id limit 51
+                """, actor, window, excludedSlot).param("cursor", afterId).param("date", filters.date())
+                .param("doctor", filters.doctor()).param("period", filters.period() == null ? null : filters.period().name())
+                .query(Slot.class).list();
+        var availability = Availability.AVAILABLE;
+        if (rows.isEmpty()) {
+            if (afterId != null || filters.active()) {
+                availability = Availability.NO_MATCH;
+            } else {
+                boolean released = scopedRevisit("select exists (" + SLOT_VIEW + " where " + REVISIT_WINDOW + ")",
+                        actor, window, excludedSlot).query(Boolean.class).single();
+                availability = released ? Availability.FULL : Availability.NOT_RELEASED;
+            }
+        }
+        return new RevisitSlotPage(rows.stream().limit(50).toList(), rows.size() > 50 ? rows.get(49).id() : null, availability);
+    }
+
+    private JdbcClient.StatementSpec scopedRevisit(String sql, Actor actor, RevisitWindow window, Long excludedSlot) {
+        return jdbc.sql(sql).param("cutoff", bookingCutoff()).param("demo", actor.demo()).param("excluded", excludedSlot)
+                .param("department", window.revisitDepartmentId()).param("first", window.revisitFrom()).param("last", window.revisitTo());
+    }
+
+    public enum DayPeriod { AM, PM }
+    public enum Availability { AVAILABLE, FULL, NOT_RELEASED, NO_MATCH }
+    public record RevisitFilters(LocalDate date, String doctor, DayPeriod period) {
+        public RevisitFilters {
+            doctor = doctor == null || doctor.isBlank() ? null : doctor.strip();
+            if (doctor != null && doctor.length() > 100) throw Problems.invalid("医生姓名筛选过长。");
+        }
+
+        boolean active() {
+            return date != null || doctor != null || period != null;
+        }
+    }
+
+    public record RevisitSlotPage(List<Slot> slots, Long nextCursor, Availability availability) { }
 
     private OffsetDateTime bookingCutoff() {
         return OffsetDateTime.now(clock).plusMinutes(AppointmentWindow.BOOKING_CUTOFF_MINUTES);
@@ -131,9 +185,10 @@ class Schedule {
                     """).param(input.doctorId()).query(Long.class).optional().orElseThrow(Problems::missing);
             requireOperations(accounts.actorById(actor.id()), departmentId);
             long id = jdbc.sql("""
-                    insert into schedule_slot(doctor_id, department_id, starts_at, ends_at, capacity, remaining)
-                    values (?, ?, ?, ?, ?, ?) returning id
-                    """).params(input.doctorId(), departmentId, input.startsAt(), input.endsAt(), input.capacity(), input.capacity())
+                    insert into schedule_slot(doctor_id, department_id, starts_at, ends_at, capacity, remaining, visit_location, preparation)
+                    values (?, ?, ?, ?, ?, ?, nullif(btrim(?), ''), nullif(btrim(?), '')) returning id
+                    """).param(input.doctorId()).param(departmentId).param(input.startsAt()).param(input.endsAt())
+                    .param(input.capacity()).param(input.capacity()).param(input.visitLocation()).param(input.preparation())
                     .query(Long.class).optional().orElseThrow(Problems::missing);
             return slot(id, false);
         } catch (DuplicateKeyException exception) {
@@ -159,16 +214,18 @@ class Schedule {
         if (!actor.demo() || !actor.has("OPERATIONS")) throw Problems.forbidden();
     }
 
-    record SlotPage(List<Slot> slots, Long nextCursor) { }
+    public record SlotPage(List<Slot> slots, Long nextCursor) { }
     record Department(long id, String name) { }
     record Doctor(long id, long departmentId, String displayName) { }
-    record Slot(long id, long doctorId, String doctorName, String department, long doctorUserId, long departmentId,
+    public record Slot(long id, long doctorId, String doctorName, String department, long doctorUserId, long departmentId,
                 OffsetDateTime startsAt, OffsetDateTime endsAt, int capacity, int remaining,
-                OffsetDateTime stoppedAt, String stopReason, boolean available, boolean doctorInDepartment) { }
+                OffsetDateTime stoppedAt, String stopReason, String visitLocation, String preparation,
+                boolean available, boolean doctorInDepartment) { }
     record Overview(List<Department> departments, List<Doctor> doctors, List<Slot> slots) { }
     record NameInput(@NotBlank @Size(max = 100) String name) { }
     record DoctorInput(@NotBlank @Size(max = 80) String username, @Positive long departmentId,
                        @NotBlank @Size(max = 100) String displayName) { }
     record SlotInput(@Positive long doctorId, @NotNull OffsetDateTime startsAt, @NotNull OffsetDateTime endsAt,
-                     @Positive @Max(1000) int capacity) { }
+                     @Positive @Max(1000) int capacity, @Size(max = 200) String visitLocation,
+                     @Size(max = 1000) String preparation) { }
 }

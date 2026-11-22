@@ -100,7 +100,8 @@ test('AC-10–12 OIDC MFA, scoped handoff and API replica failover', async ({ br
   expect((await operator.api.get('/api/v1/admin/staff')).status()).toBe(403)
   expect((await admin.api.get('/actuator/prometheus')).status()).toBe(404)
 
-  const department = (await (await operator.api.get('/api/v1/session')).json()).departmentIds[0]
+  const operatorAccount = (await (await operator.api.get('/api/v1/session')).json())
+  const department = operatorAccount.departmentIds[0]
   const otherDept = (await (await other.api.get('/api/v1/session')).json()).departmentIds[0]
   await configureDoctor(admin.api, [department], department)
   const input = slotInput(20)
@@ -125,6 +126,25 @@ test('AC-10–12 OIDC MFA, scoped handoff and API replica failover', async ({ br
   expect((await post(other.api, stop, { reason: 'Synthetic test' })).status()).toBe(404)
   expect((await post(operator.api, stop, { reason: 'Synthetic test' })).status()).toBe(204)
   expect((await (await other.api.get('/api/v1/work-items/page?departmentId=' + department)).json()).work).toEqual([])
+  const stopContact = '/appointments/' + appointment.id + '/stop-contacts'
+  const stopList = '/api/v1/appointments/stopped?appointmentId=' + appointment.id
+  expect(await (await other.api.get(stopList)).json()).toEqual([])
+  expect((await other.api.get('/api/v1' + stopContact)).status()).toBe(404)
+  expect((await post(other.api, stopContact, { outcome: 'REACHED' })).status()).toBe(404)
+  const callback = {
+    outcome: 'CALL_BACK', callbackOwnerId: operatorAccount.id, callbackDueAt: new Date(Date.now() + 3_600_000).toISOString(),
+  }
+  expect((await post(operator.api, stopContact, { outcome: 'CALL_BACK' })).status()).toBe(400)
+  expect((await post(operator.api, stopContact, callback)).status()).toBe(204)
+  expect(await (await operator.api.get(stopList)).json()).toMatchObject([
+    { id: appointment.id, contactOutcome: 'CALL_BACK', callbackOwnerId: operatorAccount.id, callbackStatus: 'OPEN' },
+  ])
+  const callbackProgress = '/api/v1/appointments/' + appointment.id + '/callback-status'
+  expect((await p2.get(callbackProgress)).status()).toBe(404)
+  expect(await (await p1.get(callbackProgress)).json()).toMatchObject({ status: 'SCHEDULED' })
+  await expect.poll(async () => (await (await p1.get('/api/v1/inbox/highlights')).json()).some(
+    (item: { kind: string; objectId: number }) => item.kind === 'APPOINTMENT_CALLBACK_UPDATED' && item.objectId === appointment.id),
+  { timeout: 12_000 }).toBe(true)
 
   const ownerId = (await (await owner.api.get('/api/v1/session')).json()).id
   const reviewerId = (await (await reviewer.api.get('/api/v1/session')).json()).id
