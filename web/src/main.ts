@@ -8,6 +8,11 @@ import './style.css'
 
 const router = createRouter({
   history: createWebHistory(),
+  scrollBehavior(to, from, savedPosition) {
+    if (savedPosition) return savedPosition
+    if (to.hash) return { el: to.hash, top: 20 }
+    if (to.path !== from.path || (from.hash && !Object.keys(to.query).length)) return { top: 0 }
+  },
   routes: [
     { path: '/', component: SignIn },
     { path: '/workspace', component: Workspace },

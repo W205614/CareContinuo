@@ -107,12 +107,23 @@ test('AC-04 stopping an active schedule includes previously confirmed reservatio
 })
 
 test('operator can publish an appointment slot from the workspace', async ({ page }) => {
-  await loginInBrowser(page, 'operations')
+  const scheduleReady = Promise.withResolvers<void>()
+  await page.route('**/api/v1/schedule', async (route) => {
+    await scheduleReady.promise
+    await route.continue()
+  })
+  const publish = page.getByRole('button', { name: '开放号源' })
+  try {
+    await loginInBrowser(page, 'operations')
+    await expect(publish).toBeDisabled()
+  } finally {
+    scheduleReady.resolve()
+  }
   const shanghaiClock = Date.now() + 8 * 3_600_000 + Math.floor(Math.random() * 300) * 60_000
   const localInput = (hours: number) => new Date(shanghaiClock + hours * 3_600_000).toISOString().slice(0, 16)
   await page.getByLabel('开始时间（北京时间）').fill(localInput(24))
   await page.getByLabel('结束时间（北京时间）').fill(localInput(25))
   await page.getByLabel('号源数量').fill('3')
-  await page.getByRole('button', { name: '开放号源' }).click()
-  await expect(page.getByRole('status')).toHaveText('号源已开放。')
+  await publish.click()
+  await expect(page.getByRole('status').filter({ hasText: '号源已开放。' })).toBeVisible()
 })
