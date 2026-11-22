@@ -161,7 +161,7 @@ watch(() => props.refreshVersion, refresh)
     <div class="section-heading"><h2 id="inbox-title">{{ patient ? '站内消息' : '工作待办' }}</h2><button type="button" class="secondary" @click="refresh">刷新</button></div>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <template v-if="patient">
-      <form class="field-grid" @submit.prevent="loadMessages()">
+      <form class="field-grid inbox-filters" @submit.prevent="loadMessages()">
         <label>消息阅读状态<select v-model="messageRead">
           <option value="">全部消息</option><option value="false">未读</option><option value="true">已读</option>
         </select></label>
@@ -187,7 +187,7 @@ watch(() => props.refreshVersion, refresh)
       <button v-if="messageCursor" class="secondary" type="button" @click="loadMessages(messageCursor)">载入更多消息</button>
     </template>
     <template v-else>
-      <form class="field-grid" @submit.prevent="loadWork()">
+      <form class="field-grid inbox-filters" @submit.prevent="loadWork()">
         <label>待办科室<select v-model.number="department">
           <option :value="0">全部科室</option>
           <option v-for="item in departments" :key="item.id" :value="item.id">{{ item.name }}</option>

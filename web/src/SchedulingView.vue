@@ -295,7 +295,7 @@ watch(() => props.appointmentId, async (id) => {
 </script>
 
 <template>
-  <div class="workspace-section">
+  <div id="schedule-workspace" class="workspace-section">
     <p v-if="error && !activeMove" role="alert" class="error">{{ error }}</p>
     <p v-if="status" role="status">{{ status }}</p>
     <form v-if="!actor.demo && (patient || operations)" class="panel field-grid" @submit.prevent="filterSlots()">
@@ -317,7 +317,7 @@ watch(() => props.appointmentId, async (id) => {
         <label>号源数量<input v-model.number="newSlot.capacity" min="1" max="1000" type="number" required /></label>
         <label>就诊地点<input v-model.trim="newSlot.visitLocation" maxlength="200" /></label>
         <label>就诊准备事项<textarea v-model.trim="newSlot.preparation" maxlength="1000" /></label>
-        <button :disabled="busy">开放号源</button>
+        <button :disabled="busy || !newSlot.doctorId">开放号源</button>
       </form>
       <details v-if="actor.demo">
         <summary>维护科室与医生</summary>

@@ -75,15 +75,26 @@ watch(() => route.fullPath, (path) => { if (path === '/workspace') void refresh(
 </script>
 
 <template>
-  <section class="panel" aria-labelledby="patient-home-title">
-    <div class="section-heading"><h2 id="patient-home-title">需要我处理的事</h2>
+  <section class="panel patient-home" aria-labelledby="patient-home-title">
+    <div class="section-heading">
+      <h2 id="patient-home-title">需要我处理的事</h2>
       <button class="secondary" type="button" @click="refresh">刷新事项</button>
     </div>
     <p v-if="error" role="alert" class="error">{{ error }}</p>
     <p v-else-if="loading">正在读取事项…</p>
-    <p v-else-if="!items.length && !replies.length && !progress.length">目前没有待处理事项。</p>
+    <dl v-else class="patient-summary">
+      <div :class="{ 'summary-urgent': urgentItems.length > 0 }">
+        <dt>优先处理</dt><dd>{{ urgentItems.length }}</dd>
+      </div>
+      <div><dt>常规安排</dt><dd>{{ ordinaryItems.length }}</dd></div>
+      <div><dt>新进展</dt><dd>{{ highlights.length }}</dd></div>
+    </dl>
+    <div v-if="!error && !loading && !items.length && !highlights.length" class="patient-empty">
+      <p>目前没有待处理事项。</p>
+      <RouterLink class="action-link" :to="{ query: route.query, hash: '#schedule-workspace' }">查看可预约时段</RouterLink>
+    </div>
     <ul v-if="urgentItems.length" class="record-list" aria-label="优先处理事项">
-      <li v-for="item in urgentItems" :key="item.type + item.id" class="record">
+      <li v-for="item in urgentItems" :key="item.type + item.id" class="record urgent-record">
         <div><strong>{{ item.title }}</strong><div>{{ item.timeLabel }} · {{ shanghaiTime(item.at) }}</div></div>
         <RouterLink class="action-link" :to="{ path: '/workspace', query: { [item.type]: item.id } }">{{ item.label }}</RouterLink>
       </li>

@@ -34,20 +34,27 @@ async function submit() {
 <template>
   <main class="sign-in">
     <section class="journey" aria-labelledby="journey-heading">
-      <h1 id="journey-heading">门诊与出院随访</h1>
-      <p>查看预约、随访安排和复诊记录。</p>
-      <ol class="journey-steps">
-        <li><span>门诊</span><span>预约与接诊</span></li>
-        <li><span>出院后</span><span>查看随访安排</span></li>
-        <li><span>复诊</span><span>预约与结果核实</span></li>
-      </ol>
+      <div class="journey-copy">
+        <div class="journey-intro">
+          <h1 id="journey-heading">诊程桥</h1>
+          <p>查看预约、随访安排和复诊进展。</p>
+        </div>
+        <ol class="journey-steps" aria-label="就医流程" role="list">
+          <li><strong>门诊预约</strong><span>查号源，确认就诊</span></li>
+          <li><strong>出院随访</strong><span>查看医护确认的安排</span></li>
+          <li><strong>复诊跟进</strong><span>预约复诊，查看进展</span></li>
+        </ol>
+      </div>
+      <div class="journey-image">
+        <img src="/care-corridor.webp" width="768" height="1152" alt="" fetchpriority="high" />
+      </div>
     </section>
     <section class="credentials" aria-labelledby="login-heading">
       <form class="sign-in-form" @submit.prevent="submit">
         <h2 id="login-heading">登录</h2>
         <a v-if="staffLogin" class="staff-login" href="/oauth2/authorization/hospital">工作人员统一登录</a>
-        <p v-if="staffLogin">合成患者使用下方账号登录。</p>
-        <p v-else>请使用本地演示账号。</p>
+        <p v-if="staffLogin" class="login-context">患者请使用下方的测试账号登录。</p>
+        <p v-else class="login-context">请使用本机演示账号。</p>
         <label for="username">账号</label>
         <input id="username" v-model.trim="username" autocomplete="username" required />
         <label for="password">密码</label>
