@@ -165,6 +165,25 @@ public class Episodes {
                 """).param(id).query(Segment.class).list();
     }
 
+    public SourceContext sourceContext(Actor actor, long episodeId, long segmentId) {
+        authorized(actor, episodeId);
+        var target = jdbc.sql("""
+                select g.id, s.title, v.id as version_id, v.version_number, g.page_number, g.line_number, g.excerpt
+                from document_segment g join document_version v on v.id = g.version_id
+                join source_document s on s.id = v.document_id where s.episode_id = ? and g.id = ?
+                """).params(episodeId, segmentId).query(Segment.class).optional().orElseThrow(Problems::missing);
+        var lines = jdbc.sql("""
+                select id, line_number, excerpt from document_segment
+                where version_id = :version and page_number is not distinct from cast(:page as integer)
+                  and (page_number is not null or line_number between :first and :last)
+                order by line_number, id
+                """).param("version", target.versionId()).param("page", target.pageNumber())
+                .param("first", target.lineNumber() - 8).param("last", target.lineNumber() + 8)
+                .query(SourceLine.class).list();
+        audit.record(actor.id(), "DOCUMENT_VERSION", target.versionId(), "READ_SOURCE_CONTEXT");
+        return new SourceContext(target, lines);
+    }
+
     public Attachment download(Actor actor, long episodeId, long versionId) {
         authorized(actor, episodeId);
         var attachment = jdbc.sql("""
@@ -277,6 +296,8 @@ public class Episodes {
                           LocalDate careDate, int sourceVersion, long departmentId) { }
     public record Choice(long id, String name) { }
     public record Directory(List<Choice> patients, List<Choice> reviewers, List<Choice> owners, List<Choice> departments) { }
+    public record SourceContext(Segment target, List<SourceLine> lines) { }
+    public record SourceLine(long id, int lineNumber, String excerpt) { }
     public record Segment(long id, String title, long versionId, int versionNumber, Integer pageNumber,
                           int lineNumber, String excerpt) { }
     public record Document(long id, String title, long versionId, int versionNumber, String filename,

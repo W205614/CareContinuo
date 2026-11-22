@@ -87,10 +87,18 @@ class EpisodeController {
         return Map.of("versionId", episodes.addFile(accounts.actor(principal), id, documentId, title.strip(), upload));
     }
 
+    @GetMapping("/episodes/{id}/segments/{segmentId}/context")
+    Episodes.SourceContext sourceContext(Principal principal, @PathVariable long id, @PathVariable long segmentId) {
+        return episodes.sourceContext(accounts.actor(principal), id, segmentId);
+    }
+
     @GetMapping("/episodes/{id}/versions/{versionId}/download")
-    ResponseEntity<byte[]> download(Principal principal, @PathVariable long id, @PathVariable long versionId) {
+    ResponseEntity<byte[]> download(Principal principal, @PathVariable long id, @PathVariable long versionId,
+                                    @RequestParam(defaultValue = "false") boolean inline) {
         var file = episodes.download(accounts.actor(principal), id, versionId);
-        String disposition = ContentDisposition.attachment().filename(file.filename(), StandardCharsets.UTF_8).build().toString();
+        var builder = inline && MediaType.APPLICATION_PDF_VALUE.equals(file.mediaType())
+                ? ContentDisposition.inline() : ContentDisposition.attachment();
+        String disposition = builder.filename(file.filename(), StandardCharsets.UTF_8).build().toString();
         return ResponseEntity.ok().contentType(MediaType.parseMediaType(file.mediaType()))
                 .header(HttpHeaders.CONTENT_DISPOSITION, disposition).body(file.content());
     }

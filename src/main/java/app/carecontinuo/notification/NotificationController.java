@@ -28,6 +28,28 @@ class NotificationController {
         return notifications.inbox(accounts.actor(principal));
     }
 
+    @GetMapping("/inbox/page")
+    Notifications.MessagePage inboxPage(Principal principal, @RequestParam(required = false) Boolean read,
+                                        @RequestParam(required = false) Notifications.MessageGroup group,
+                                        @RequestParam(required = false) Long afterId) {
+        return notifications.inboxPage(accounts.actor(principal), read, group, afterId);
+    }
+
+    @GetMapping("/inbox/highlights")
+    List<Notifications.Message> unreadHighlights(Principal principal) {
+        return notifications.unreadHighlights(accounts.actor(principal));
+    }
+
+    @GetMapping("/inbox/revisit-replies")
+    List<Notifications.Message> unreadRevisitReplies(Principal principal) {
+        return notifications.unreadRevisitReplies(accounts.actor(principal));
+    }
+
+    @GetMapping("/inbox/followup-progress")
+    List<Notifications.Message> unreadFollowupProgress(Principal principal) {
+        return notifications.unreadFollowupProgress(accounts.actor(principal));
+    }
+
     @GetMapping("/inbox/{id}")
     Notifications.Message message(Principal principal, @PathVariable long id) {
         return notifications.message(accounts.actor(principal), id);
@@ -47,8 +69,14 @@ class NotificationController {
     @GetMapping("/work-items/page")
     Notifications.WorkPage workPage(Principal principal, @RequestParam(required = false) Long departmentId,
                                      @RequestParam(required = false) String state,
+                                     @RequestParam(required = false) String kind,
                                      @RequestParam(required = false) Long afterId) {
-        return notifications.workPage(accounts.actor(principal), departmentId, state, afterId);
+        return notifications.workPage(accounts.actor(principal), departmentId, state, kind, afterId);
+    }
+
+    @GetMapping("/work-items/{id}")
+    Notifications.Work workItem(Principal principal, @PathVariable long id) {
+        return notifications.workItem(accounts.actor(principal), id);
     }
 
     @PostMapping("/work-items/{id}/retry")

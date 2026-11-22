@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from 'vue'
 import { api, mutate } from './api'
+import SourceLocator from './SourceLocator.vue'
 
 interface Reference { segmentId: number; quote: string }
 export interface Candidate { kind: string; title: string; instructions: string; dueDate: string | null; references: Reference[] }
@@ -83,7 +84,9 @@ onBeforeUnmount(() => { requestVersion++; clearTimeout(refreshTimer) })
       <ul v-if="job.outcome?.conflicts.length" class="source-list">
         <li v-for="conflict in job.outcome.conflicts" :key="conflict.reason">
           <strong>{{ conflict.reason }}</strong>
-          <p v-for="evidence in conflict.references" :key="evidence.segmentId">{{ evidence.quote }}</p>
+          <div v-for="evidence in conflict.references" :key="evidence.segmentId">
+            <SourceLocator :episode-id="episodeId" :segment-id="evidence.segmentId">定位原文 · {{ evidence.quote }}</SourceLocator>
+          </div>
         </li>
       </ul>
       <template v-if="job.status === 'CONFLICT'">
@@ -95,7 +98,12 @@ onBeforeUnmount(() => { requestVersion++; clearTimeout(refreshTimer) })
       </template>
       <ul v-if="job.status === 'READY' && job.outcome" class="record-list">
         <li v-for="candidate in job.outcome.candidates" :key="`${candidate.title}-${candidate.references[0]?.segmentId}`" class="record">
-          <div><strong>{{ candidate.title }}</strong><p>{{ candidate.instructions }}</p><p v-for="reference in candidate.references" :key="reference.segmentId">原文 · {{ reference.quote }}</p></div>
+          <div>
+            <strong>{{ candidate.title }}</strong><p>{{ candidate.instructions }}</p>
+            <div v-for="reference in candidate.references" :key="reference.segmentId">
+              <SourceLocator :episode-id="episodeId" :segment-id="reference.segmentId">定位原文 · {{ reference.quote }}</SourceLocator>
+            </div>
+          </div>
           <button type="button" class="secondary" @click="emit('use', candidate)">填入草稿</button>
         </li>
       </ul>

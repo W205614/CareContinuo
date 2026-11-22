@@ -1,3 +1,6 @@
+logging:
+  pattern:
+    level: "%5p [request:%X{requestId:-}]"
 spring:
   application:
     name: carecontinuo
