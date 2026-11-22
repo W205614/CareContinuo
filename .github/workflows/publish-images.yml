@@ -1,0 +1,106 @@
+name: Publish verified OCI images
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: Draft release containing the verified candidate archives
+        required: true
+        type: string
+      manifest_sha256:
+        description: SHA-256 of the verified candidate manifest
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: carecontinuo-oci-publication
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_ID: ${{ inputs.release_id }}
+      MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
+    steps:
+      - name: Load the verified candidates from the draft release
+        shell: bash
+        run: |
+          [[ "$RELEASE_ID" =~ ^[0-9]+$ ]]
+          [[ "$MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          route="repos/$GITHUB_REPOSITORY/releases"
+          gh api "$route/$RELEASE_ID" > release.json
+          jq -e '.draft == true' release.json
+          source_sha=$(jq -er .target_commitish release.json)
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+          ancestry=$(gh api "repos/$GITHUB_REPOSITORY/compare/$source_sha...$GITHUB_SHA" --jq .status)
+          [[ "$ancestry" == identical || "$ancestry" == ahead ]]
+          version=$(jq -r .tag_name release.json)
+          [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          asset() {
+            local id
+            id=$(jq -er --arg name "$1" '.assets[] | select(.name == $name) | .id' release.json)
+            gh api "$route/assets/$id" -H 'Accept: application/octet-stream' > "$1"
+          }
+          asset candidate-images.json
+          printf '%s  candidate-images.json\n' "$MANIFEST_SHA256" | sha256sum -c -
+          jq -e --arg sha "$source_sha" --arg v "$version" \
+            '.commit == $sha and .version == $v and (.images | keys) == ["agent", "api", "web"]' candidate-images.json
+          for service in api agent web; do
+            asset "candidate-$service.tar"
+            hash=$(jq -er --arg service "$service" '.images[$service].archiveSha256' candidate-images.json)
+            [[ "$hash" =~ ^[0-9a-f]{64}$ ]]
+            printf '%s  candidate-%s.tar\n' "$hash" "$service" | sha256sum -c -
+            docker load -i "candidate-$service.tar"
+          done
+
+      - name: Publish and verify the registry content
+        shell: bash
+        run: |
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          version=$(jq -r .version candidate-images.json)
+          source_sha=$(jq -r .commit candidate-images.json)
+          for service in api agent web; do
+            repo="ghcr.io/${GITHUB_REPOSITORY,,}-$service"
+            target="$repo:$version"
+            revision=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$target")
+            [[ "$revision" == "$source_sha" ]]
+            platform=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$target")
+            [[ "$platform" == linux/amd64 ]]
+            if docker manifest inspect "$target" > /tmp/remote-manifest.json 2> /tmp/inspect-error; then
+              echo "Found an existing version; verifying its content."
+            elif grep -Eiq 'manifest unknown|no such manifest|name unknown' /tmp/inspect-error; then
+              docker push "$target"
+            else
+              cat /tmp/inspect-error >&2
+              exit 1
+            fi
+            docker pull "$target"
+            docker save "$target" -o "pulled-$service.tar"
+            SERVICE="$service" IMAGE="$target" python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import tarfile
+
+          service = os.environ["SERVICE"]
+          target = os.environ["IMAGE"]
+          with open("candidate-images.json") as source:
+              expected = json.load(source)["images"][service]
+          with tarfile.open(f"pulled-{service}.tar") as image:
+              manifest = json.load(image.extractfile("manifest.json"))
+              entry = next(item for item in manifest if target in item["RepoTags"])
+              config = image.extractfile(entry["Config"]).read()
+          assert "sha256:" + hashlib.sha256(config).hexdigest() == expected["configDigest"], target
+          assert json.loads(config)["rootfs"]["diff_ids"] == expected["diffIds"], target
+          PY
+            docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$target" |
+              grep -F "$repo@" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
