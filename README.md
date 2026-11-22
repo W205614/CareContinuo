@@ -20,6 +20,10 @@ CareContinuo 把门诊预约、出院随访和复诊放在同一条患者记录�
 
 ## 本机体验
 
+要使用预构建镜像，从发布页选择带 `compose.release.yaml` 的版本。该版本的发布说明提供固定镜像摘要、平台和启动命令。 [GitHub Releases](https://github.com/W205614/CareContinuo/releases)
+
+### 从源码构建
+
 在 Docker Engine 与 Compose 可用的环境中，从仓库源码启动演示。以下命令从新目录执行。如果已有同名 Compose 项目，先核对它的数据库卷和配置。
 
 ```sh

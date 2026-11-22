@@ -54,11 +54,23 @@ jobs:
           jq -e --arg sha "$source_sha" --arg v "$version" \
             '.commit == $sha and .version == $v and (.images | keys) == ["agent", "api", "web"]' candidate-images.json
           for service in api agent web; do
-            asset "candidate-$service.tar"
+            archive="candidate-$service.tar"
+            if jq -e --arg name "$archive" 'any(.assets[]; .name == $name and .state == "uploaded")' release.json; then
+              asset "$archive"
+            else
+              asset "$archive.index.json"
+              jq -e --arg name "$archive" '.archive == $name and (.parts | length) > 1' "$archive.index.json"
+              mapfile -t parts < <(jq -er '.parts[].name' "$archive.index.json")
+              for part in "${parts[@]}"; do
+                [[ "$part" =~ ^candidate-$service\.tar\.part[0-9]{2}$ ]]
+                asset "$part"
+              done
+              cat -- "${parts[@]}" > "$archive"
+            fi
             hash=$(jq -er --arg service "$service" '.images[$service].archiveSha256' candidate-images.json)
             [[ "$hash" =~ ^[0-9a-f]{64}$ ]]
-            printf '%s  candidate-%s.tar\n' "$hash" "$service" | sha256sum -c -
-            docker load -i "candidate-$service.tar"
+            printf '%s  %s\n' "$hash" "$archive" | sha256sum -c -
+            docker load -i "$archive"
           done
 
       - name: Publish and verify the registry content
