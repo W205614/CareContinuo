@@ -148,7 +148,7 @@ Spring Boot 负责对象授权、号源库存、资料版本和人工审核。�
 # 镜像路线
 docker compose -p carecontinuo-image -f compose.yaml -f compose.release.yaml stop
 # 源码路线
-docker compose -p carecontinuo-source stop
+docker compose -p carecontinuo-source -f compose.yaml stop
 ```
 
 启用真实模型后，在对应停止命令的 `stop` 前加上 `-f compose.live.yaml`，并保留 `CARE_OPENAI_KEY_FILE` 的设置。升级前记录旧版本并备份 PostgreSQL。需要回退时，在独立数据库恢复迁移前备份，核对后再使用兼容版本。 [升级、备份和恢复](docs/预生产部署与验收.md#升级备份和恢复)
