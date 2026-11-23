@@ -76,14 +76,18 @@ Compose 按当前检出的文件构建三个应用镜像并启动数据库。本
 
 ### 可选真实模型
 
-要体验 Agent 候选，从源码根目录准备一个本机密钥文件，以只读方式叠加挂载。用 `OPENAI_MODEL` 指定该账号可用的模型。启动沿用源码演示卷，实际模型请求仅使用合成资料。
+将模型密钥保存在本机文件中。以下命令以只读方式挂载该文件，请求模型时仅使用合成资料。`OPENAI_MODEL` 默认是 `gpt-6.2-sol`，可按账号可用的模型调整。
+
+**发布镜像路线**在[拉取 v0.1.1 镜像](#拉取-v011-镜像)一节取得的 Tag 目录中执行。保留 `compose.release.yaml` 的固定镜像摘要，追加 `compose.live.yaml` 启用真实模型。
 
 ```powershell
 $env:CARE_OPENAI_KEY_FILE = (Resolve-Path "$env:LOCALAPPDATA/CareContinuo/openai-api-key").Path
-docker compose -p carecontinuo-source -f compose.yaml -f compose.live.yaml up --build --wait
+docker compose -p carecontinuo-image -f compose.yaml -f compose.release.yaml -f compose.live.yaml up --no-build --wait
 ```
 
-保存资料后，可在同一条诊疗记录中请求 Agent 候选。随访员核对引用和日期后将候选填入草稿，补齐审核医生、所需复诊条件和完成期限，沿用上述审核步骤。 [历史真实模型验收](docs/首版验收记录.md)
+**源码路线**在源码根目录设置同一密钥文件路径，再运行 `docker compose -p carecontinuo-source -f compose.yaml -f compose.live.yaml up --build --wait`。
+
+保存合成出院资料时，在原文中写明具体复诊日期。随访员点击「从当前资料提取」，核对引用和日期后点「填入草稿」。补齐审核医生、复诊科室和独立的完成期限，保存并提交审核。 [v0.1.1 真实模型复验](docs/首版验收记录.md#v011-发布镜像真实模型复验)
 
 ## 新版前端实拍
 
@@ -147,6 +151,6 @@ docker compose -p carecontinuo-image -f compose.yaml -f compose.release.yaml sto
 docker compose -p carecontinuo-source stop
 ```
 
-若源码路线启用了真实模型，停止时也沿用 `-f compose.yaml -f compose.live.yaml`。升级前记录旧版本并备份 PostgreSQL。需要回退时，在独立数据库恢复迁移前备份，核对后再使用兼容版本。 [升级、备份和恢复](docs/预生产部署与验收.md#升级备份和恢复)
+启用真实模型后，在对应停止命令的 `stop` 前加上 `-f compose.live.yaml`，并保留 `CARE_OPENAI_KEY_FILE` 的设置。升级前记录旧版本并备份 PostgreSQL。需要回退时，在独立数据库恢复迁移前备份，核对后再使用兼容版本。 [升级、备份和恢复](docs/预生产部署与验收.md#升级备份和恢复)
 
 [需求文档](CareContinuo-需求文档.md) · [开发交接](AGENTS.md) · [GitHub Issues](https://github.com/W205614/CareContinuo/issues) · [安全政策](SECURITY.md) · [项目 MIT 许可证](LICENSE) · [Maven Wrapper 许可](.mvn/wrapper/LICENSE) · [Maven Wrapper 声明](.mvn/wrapper/NOTICE)
