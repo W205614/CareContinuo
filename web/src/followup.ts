@@ -1,6 +1,8 @@
 export interface CareEpisode { id: number; patient: string; patientId: number; reference: string; kind: string; careDate: string; sourceVersion: number; departmentId: number }
 export interface Choice { id: number; name: string }
-export interface Directory { patients: Choice[]; reviewers: Choice[]; owners: Choice[]; departments: Choice[] }
+export interface Directory {
+  reviewers: Choice[]; owners: Choice[]; departments: Choice[]; syntheticDischarges: boolean; pdfEnabled: boolean
+}
 export interface Source { id: number; title: string; versionId: number; versionNumber: number; pageNumber: number | null; lineNumber: number; excerpt: string }
 export interface SourceContext {
   target: Source

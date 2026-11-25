@@ -10,6 +10,7 @@ interface Job { id: number; status: string; failureCode: string | null; outcome:
 const props = defineProps<{ episodeId: number; sourceVersion: number; reviewOnly?: boolean }>()
 const emit = defineEmits<{ use: [candidate: Candidate] }>()
 const jobs = ref<Job[]>([])
+const enabled = ref<boolean>()
 const busy = ref(false)
 const error = ref('')
 const reasons = ref<Record<number, string>>({})
@@ -18,7 +19,7 @@ let requestVersion = 0
 
 const statusNames: Record<string, string> = { QUEUED: '已排队', RUNNING: '正在提取', READY: '可查看候选', CONFLICT: '资料冲突', RESOLVED: '误报已解除', FAILED: '生成失败', STALE: '资料已更新' }
 const failures: Record<string, string> = {
-  MODEL_KEY_UNAVAILABLE: '本机 Agent 尚未安装密钥。', MODEL_AUTHENTICATION_FAILED: '模型凭据未通过认证。',
+  MODEL_DISABLED: '当前环境已关闭 Agent。', MODEL_KEY_UNAVAILABLE: '本机 Agent 尚未安装密钥。', MODEL_AUTHENTICATION_FAILED: '模型凭据未通过认证。',
   MODEL_PERMISSION_DENIED: '模型调用权限不足。', MODEL_UNAVAILABLE: '当前项目无法访问配置的模型。',
   MODEL_TIMEOUT: '模型响应超时。', MODEL_SOURCE_MISMATCH: '候选内容无法定位到原文。',
   MODEL_NO_USABLE_OUTPUT: '模型没有返回可用事项。', MODEL_QUOTA_OR_RATE_LIMIT: '模型请求达到配额或速率限制。',
@@ -30,10 +31,13 @@ async function refresh() {
   const generation = ++requestVersion
   clearTimeout(refreshTimer)
   try {
-    const snapshot = await api<Job[]>(`/episodes/${episodeId}/agent-jobs`)
+    const snapshot = await api<{ enabled: boolean; jobs: Job[] }>(`/episodes/${episodeId}/agent-jobs`)
     if (generation !== requestVersion) return
-    jobs.value = props.reviewOnly ? snapshot.filter((item) => ['CONFLICT', 'RESOLVED'].includes(item.status)) : snapshot
-    if (snapshot.some((item) => ['QUEUED', 'RUNNING'].includes(item.status))) refreshTimer = setTimeout(refresh, 1500)
+    enabled.value = snapshot.enabled
+    jobs.value = props.reviewOnly ? snapshot.jobs.filter((item) => ['CONFLICT', 'RESOLVED'].includes(item.status)) : snapshot.jobs
+    if (snapshot.enabled && snapshot.jobs.some((item) => ['QUEUED', 'RUNNING'].includes(item.status))) {
+      refreshTimer = setTimeout(refresh, 1500)
+    }
   } catch (failure) {
     if (generation === requestVersion) error.value = (failure as Error).message
   }
@@ -63,6 +67,7 @@ async function resolve(jobId: number) {
 
 watch(() => [props.episodeId, props.sourceVersion], () => {
   jobs.value = []
+  enabled.value = undefined
   reasons.value = {}
   error.value = ''
   void refresh()
@@ -74,8 +79,9 @@ onBeforeUnmount(() => { requestVersion++; clearTimeout(refreshTimer) })
   <div v-if="!reviewOnly || jobs.length || error" class="panel">
     <div class="section-heading">
       <h3>{{ reviewOnly ? '资料冲突核实' : 'GPT 草稿候选' }}</h3>
-      <button v-if="!reviewOnly" type="button" class="secondary" :disabled="busy || jobs.some((item) => ['QUEUED', 'RUNNING'].includes(item.status))" @click="generate">从当前资料提取</button>
+      <button v-if="!reviewOnly && enabled" type="button" class="secondary" :disabled="busy || jobs.some((item) => ['QUEUED', 'RUNNING'].includes(item.status))" @click="generate">从当前资料提取</button>
     </div>
+    <p v-if="!reviewOnly && enabled === false">当前环境已关闭 Agent，可以手工填写草稿。</p>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <details v-for="job in jobs" :key="job.id" :open="job.id === jobs[0]?.id">
       <summary>{{ statusNames[job.status] }}<span v-if="job.outcome"> · {{ job.outcome.model }}</span></summary>

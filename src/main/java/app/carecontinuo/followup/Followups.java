@@ -34,7 +34,7 @@ public class Followups {
             join app_user owner on owner.id = t.owner_id
             """;
     private static final String REVISION_SQL = """
-            select id, version_number, source_version, task_kind, title, instructions, due_at, manual_reference,
+            select id, version_number, source_version, author_id, task_kind, title, instructions, due_at, manual_reference,
               revisit_from, revisit_to, revisit_department_id,
               (select d.name from department d where d.id = followup_revision.revisit_department_id) as revisit_department
             from followup_revision where task_id = ?
@@ -74,7 +74,8 @@ public class Followups {
         if (actor.has("PATIENT")) {
             var tasks = jdbc.sql(TASK_SQL + (actionable ? """
                     join followup_revision published on published.id = t.published_revision_id
-                    where e.patient_id = ? and (t.needs_review or t.status in ('DISPATCHED', 'PATIENT_REPLIED'))
+                    where e.patient_id = ? and t.status <> 'CLOSED'
+                      and (t.needs_review or t.status in ('DISPATCHED', 'PATIENT_REPLIED'))
                     order by t.needs_review desc, published.due_at, t.id limit 100
                     """ : " where e.patient_id = ? and t.published_revision_id is not null order by t.id desc limit 100"))
                     .param(actor.patientId()).query(Task.class).list();
@@ -217,13 +218,17 @@ public class Followups {
     void updateResult(Actor actor, long id, ResultInput input) {
         episodes.lock(load(id).episodeId());
         var task = load(id);
-        requireOwner(accounts.actorById(actor.id()), task);
+        var current = accounts.actorById(actor.id());
+        requireOwner(current, task);
         requirePublished(task);
         expectVersion(task, input.version());
         var published = publishedRevision(task);
         if (!published.taskKind().equals("PENDING_RESULT")) throw Problems.conflict("该随访没有待出检查结果。");
         String message = input.message() == null || input.message().isBlank() ? null : input.message().strip();
-        if (input.stage() == ResultStage.PLAN_AVAILABLE && message == null) {
+        if (!current.demo() && message != null) {
+            throw Problems.invalid("当前环境仅允许发布检查进度。结果解读请使用机构既有渠道。");
+        }
+        if (current.demo() && input.stage() == ResultStage.PLAN_AVAILABLE && message == null) {
             throw Problems.invalid("请填写患者可见的后续安排。");
         }
         String stage = input.stage().name();
@@ -364,7 +369,8 @@ public class Followups {
                 ensureOpen(task);
                 if (input.closureReason() == null) throw Problems.invalid("请选择结案原因。");
                 feedback(actor, task, "CLOSURE", input.closureReason().name() + " · " + note(input));
-                transition(task, "CLOSED");
+                jdbc.sql("update followup_task set status = 'CLOSED', needs_review = false where id = ?")
+                        .param(task.id()).update();
                 requests.finish(task.id(), actor.id(), false);
                 closeWork(actor, task, "人工结案");
             }
@@ -373,7 +379,7 @@ public class Followups {
     }
 
     private void review(Actor actor, Task task, Revision revision, ActionInput input) {
-        requireReviewer(actor, task);
+        requireIndependentReviewer(actor, task, revision);
         requireStatus(task, "IN_REVIEW");
         boolean approve = input.action() == Action.APPROVE;
         String decision = approve ? "APPROVED" : "RETURNED";
@@ -384,9 +390,15 @@ public class Followups {
     }
 
     private void dispatch(Actor actor, Task task, Revision revision) {
-        requireReviewer(actor, task);
+        requireIndependentReviewer(actor, task, revision);
         requireStatus(task, "APPROVED");
         requireRevisitWindow(revision);
+        if (!jdbc.sql("""
+                select exists(select 1 from followup_review
+                  where revision_id = ? and decision = 'APPROVED' and actor_id <> ?)
+                """).params(revision.id(), revision.authorId()).query(Boolean.class).single()) {
+            throw Problems.conflict("当前随访版本须由其他医护审核通过。");
+        }
         if (jdbc.sql("""
                 select exists(select 1 from agent_job where episode_id = ? and source_version = ? and status = 'CONFLICT')
                 """).params(task.episodeId(), revision.sourceVersion()).query(Boolean.class).single()) {
@@ -440,6 +452,7 @@ public class Followups {
         ensureOpen(task);
         long owner = input.ownerId() == null ? task.ownerId() : input.ownerId();
         long reviewer = input.reviewerId() == null ? task.reviewerId() : input.reviewerId();
+        if (reviewer == revision(task).authorId()) throw Problems.conflict("随访版本作者不能担任该版本的审核人。");
         if (owner == reviewer || (owner == task.ownerId() && reviewer == task.reviewerId())) {
             throw Problems.invalid("请重新选择不同的负责人和审核人。");
         }
@@ -545,20 +558,23 @@ public class Followups {
         String feedbackSql = """
                 select f.id, f.kind, f.detail, f.created_at, u.display_name as actor, f.source_encounter_id
                 from followup_feedback f join app_user u on u.id = f.actor_id where f.task_id = ?
-                """ + (patient ? " and f.kind in ('PATIENT', 'VERIFICATION')" : "") + " order by f.id";
+                """ + (patient ? " and f.kind = 'PATIENT'" : "") + " order by f.id";
         List<Feedback> entries = expanded ? jdbc.sql(feedbackSql).param(task.id()).query(Feedback.class).list() : List.of();
         List<Review> reviews = patient || !expanded ? List.of() : jdbc.sql("""
                 select id, decision, reason, created_at from followup_review where revision_id = ? order by id
                 """).param(revision.id()).query(Review.class).list();
-        String instructions = patient && task.needsReview() ? null : revision.instructions();
-        String state = patient && task.needsReview() ? "UNDER_CORRECTION" : task.status();
+        boolean closed = task.status().equals("CLOSED");
+        boolean needsReview = !closed && task.needsReview();
+        String instructions = patient && (needsReview || closed) ? null : revision.instructions();
+        String state = patient && needsReview ? "UNDER_CORRECTION" : task.status();
         int version = patient ? revision.versionNumber() : task.versionNumber();
-        List<ResultUpdate> results = !expanded || !revision.taskKind().equals("PENDING_RESULT") || patient && task.needsReview()
+        List<ResultUpdate> results = !expanded || !revision.taskKind().equals("PENDING_RESULT") || patient && (needsReview || closed)
                 ? List.of() : jdbc.sql("""
-                select stage, patient_message, created_at from followup_result_update where revision_id = ? order by id desc
-                """).param(revision.id()).query(ResultUpdate.class).list();
+                select stage, case when :includeMessage then patient_message end as patient_message, created_at
+                from followup_result_update where revision_id = :revision order by id desc
+                """).param("includeMessage", !patient || actor.demo()).param("revision", revision.id()).query(ResultUpdate.class).list();
         return new View(task.id(), task.episodeId(), task.reference(), task.patient(), task.ownerId(), task.ownerName(), task.reviewerId(), task.departmentId(),
-                state, version, task.needsReview(), revision.taskKind(), revision.title(), instructions,
+                state, version, needsReview, revision.taskKind(), revision.title(), instructions,
                 revision.dueAt(), revision.revisitFrom(), revision.revisitTo(), revision.revisitDepartmentId(),
                 revision.revisitDepartment(), patient ? null : revision.manualReference(), sources, entries, reviews,
                 expanded ? requests.history(task.id()) : List.of(), expanded ? requests.replies(task.id()) : List.of(), previous, results);
@@ -608,8 +624,9 @@ public class Followups {
         if (!actor.has("FOLLOWUP") || task.ownerId() != actor.id() || !actor.inDepartment(task.departmentId())) throw Problems.missing();
     }
 
-    private static void requireReviewer(Actor actor, Task task) {
+    private static void requireIndependentReviewer(Actor actor, Task task, Revision revision) {
         if (!actor.has("REVIEWER") || task.reviewerId() != actor.id() || !actor.inDepartment(task.departmentId())) throw Problems.missing();
+        if (actor.id() == revision.authorId()) throw Problems.conflict("随访版本作者不能审核或派发该版本。");
     }
 
     private static void expectVersion(Task task, int expected) {
@@ -660,7 +677,7 @@ public class Followups {
     public record Review(long id, String decision, String reason, OffsetDateTime createdAt) { }
     private record Task(long id, long episodeId, long patientId, long ownerId, long reviewerId, String status,
                         int versionNumber, Long publishedRevisionId, boolean needsReview, String reference, String patient, long departmentId, String ownerName) { }
-    private record Revision(long id, int versionNumber, int sourceVersion, String taskKind, String title,
+    private record Revision(long id, int versionNumber, int sourceVersion, long authorId, String taskKind, String title,
                             String instructions, OffsetDateTime dueAt, String manualReference, LocalDate revisitFrom,
                             LocalDate revisitTo, Long revisitDepartmentId, String revisitDepartment) {
         RevisitWindow revisitWindow() {

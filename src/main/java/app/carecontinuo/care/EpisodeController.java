@@ -12,6 +12,7 @@ import java.security.Principal;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
+import org.springframework.http.CacheControl;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -51,8 +52,8 @@ class EpisodeController {
     @PostMapping("/episodes")
     @ResponseStatus(HttpStatus.CREATED)
     Map<String, Long> add(Principal principal, @Valid @RequestBody Discharge input) {
-        return Map.of("id", episodes.registerDischarge(accounts.actor(principal), input.patientId(),
-                input.reference().strip(), input.careDate(), input.departmentId()));
+        return Map.of("id", episodes.registerDischarge(accounts.actor(principal), input.patientReference().strip(),
+                input.patientName().strip(), input.reference().strip(), input.careDate(), input.departmentId()));
     }
 
     @PostMapping("/appointments/{id}/return-plan")
@@ -100,11 +101,12 @@ class EpisodeController {
                 ? ContentDisposition.inline() : ContentDisposition.attachment();
         String disposition = builder.filename(file.filename(), StandardCharsets.UTF_8).build().toString();
         return ResponseEntity.ok().contentType(MediaType.parseMediaType(file.mediaType()))
-                .header(HttpHeaders.CONTENT_DISPOSITION, disposition).body(file.content());
+                .cacheControl(CacheControl.noStore()).header(HttpHeaders.CONTENT_DISPOSITION, disposition).body(file.content());
     }
 
-    record Discharge(@Positive long patientId, @NotBlank @Size(max = 100) String reference,
-                     @NotNull LocalDate careDate, @Positive Long departmentId) { }
+    record Discharge(@NotBlank @Size(max = 100) String patientReference, @NotBlank @Size(max = 100) String patientName,
+                     @NotBlank @Size(max = 100) String reference, @NotNull LocalDate careDate,
+                     @Positive Long departmentId) { }
     record Assignment(@Positive long ownerId) { }
     record Text(@Positive Long documentId, @NotBlank @Size(max = 200) String title,
                 @NotBlank @Size(max = 80000) String text) { }

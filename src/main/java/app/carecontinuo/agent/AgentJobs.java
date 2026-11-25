@@ -48,13 +48,15 @@ class AgentJobs {
     private final Clock clock;
     private final URI endpoint;
     private final String serviceKey;
+    private final boolean enabled;
     private final io.micrometer.core.instrument.Counter timeouts;
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
 
     AgentJobs(JdbcClient jdbc, Episodes episodes, Accounts accounts, AuditLog audit, Notifications notices,
               TransactionTemplate transactions, JsonMapper json, Clock clock,
               @Value("${CARE_AGENT_URL:http://localhost:8000}") String baseUrl,
-              @Value("${care.agent.key-file:}") String keyFile, io.micrometer.core.instrument.MeterRegistry metrics)
+              @Value("${care.agent.key-file:}") String keyFile,
+              @Value("${care.agent.enabled:false}") boolean enabled, io.micrometer.core.instrument.MeterRegistry metrics)
             throws IOException {
         this.jdbc = jdbc;
         this.episodes = episodes;
@@ -64,6 +66,7 @@ class AgentJobs {
         this.transactions = transactions;
         this.json = json;
         this.clock = clock;
+        this.enabled = enabled;
         serviceKey = keyFile.isBlank() ? "" : Files.readString(Path.of(keyFile)).strip();
         if (!keyFile.isBlank() && serviceKey.length() < 32) throw new IllegalStateException("Invalid Agent service key");
         timeouts = metrics.counter("care.agent.timeouts");
@@ -77,6 +80,7 @@ class AgentJobs {
         var current = accounts.actorById(actor.id());
         if (!current.has("FOLLOWUP")) throw Problems.missing();
         episodes.authorized(current, episodeId);
+        if (!enabled) throw Problems.conflict("当前环境已关闭 Agent，请手工填写随访草稿。");
         var currentJob = jdbc.sql(JOB_SQL + " where episode_id = ? and source_version = ? and created_by = ?"
                         + " and status in ('QUEUED', 'RUNNING', 'READY', 'CONFLICT', 'RESOLVED') order by id desc limit 1")
                 .params(episodeId, episode.sourceVersion(), actor.id()).query(Job.class).optional();
@@ -93,11 +97,14 @@ class AgentJobs {
         return view(find(id), episode);
     }
 
-    List<View> list(Actor actor, long episodeId) {
+    JobList list(Actor actor, long episodeId) {
         var episode = episodes.authorized(actor, episodeId);
-        return jdbc.sql(JOB_SQL + " where episode_id = ? order by id desc limit 15").param(episodeId).query(Job.class)
-                .list().stream().map(job -> view(job, episode)).toList();
+        audit.record(actor.id(), "EPISODE", episodeId, "READ_AGENT_JOBS");
+        var rows = jdbc.sql(JOB_SQL + " where episode_id = ? order by id desc limit 15").param(episodeId).query(Job.class).list();
+        return new JobList(enabled, rows.stream().map(job -> view(job, episode)).toList());
     }
+
+    record JobList(boolean enabled, List<View> jobs) { }
 
     View get(Actor actor, long id) {
         var job = find(id);
@@ -125,6 +132,13 @@ class AgentJobs {
 
     @Scheduled(fixedDelayString = "${care.agent.poll-ms:1500}", scheduler = "agentScheduler")
     void poll() {
+        if (!enabled) {
+            jdbc.sql("""
+                    update agent_job set status = 'FAILED', failure_code = 'MODEL_DISABLED'
+                    where status in ('QUEUED', 'RUNNING')
+                    """).update();
+            return;
+        }
         jdbc.sql("""
                 update agent_job set status = 'FAILED', failure_code = 'MODEL_INTERRUPTED'
                 where status = 'RUNNING' and expires_at <= clock_timestamp()

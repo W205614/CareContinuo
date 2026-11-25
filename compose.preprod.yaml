@@ -11,6 +11,8 @@ x-app: &app
     CARE_OIDC_BACKCHANNEL: http://idp:8080/id/realms/care
     CARE_OIDC_ACR: "2"
     CARE_AGENT_URL: http://agent:8000
+    CARE_AGENT_ENABLED: "true"
+    CARE_SYNTHETIC_DISCHARGES_ENABLED: "true"
   depends_on:
     migrate:
       condition: service_completed_successfully

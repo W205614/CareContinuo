@@ -5,6 +5,9 @@ services:
   web:
     labels:
       app.carecontinuo.e2e: "true"
+  api:
+    environment:
+      CARE_AGENT_ENABLED: "${CARE_E2E_AGENT_ENABLED:-true}"
   agent:
     command: [".venv/bin/uvicorn", "model_fixture:app", "--host", "0.0.0.0", "--port", "8000"]
     volumes:

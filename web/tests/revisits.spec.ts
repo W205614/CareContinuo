@@ -7,7 +7,7 @@ test('AC-01 and AC-07 patient can rebook and staff can verify an actual consulta
   test.setTimeout(90_000)
   const [owner, patient, other, ops] = await Promise.all(['followup', 'patient-a', 'patient-b', 'operations'].map(signedIn))
   const directory = (await (await get(owner, '/care-directory')).json())
-  const { id: episodeId } = await (await post(owner, '/episodes', { patientId: directory.patients[0].id,
+  const { id: episodeId } = await (await post(owner, '/episodes', { patientReference: 'DEMO-A', patientName: '患者甲',
     reference: `REVISIT-${randomUUID()}`, careDate: new Date().toISOString().slice(0, 10) })).json()
   expect((await post(owner, `/episodes/${episodeId}/documents`, {
     title: '合成出院小结', text: '出院后请按安排于 2099-12-05 门诊复诊。',
@@ -118,8 +118,10 @@ test('AC-01 and AC-07 patient can rebook and staff can verify an actual consulta
   await staffDetail.getByRole('button', { name: '确认提交' }).click()
   await expect(staffDetail).toContainText('医护已核实')
   const confirmed = await (await get(patient, `/followups/${taskId}`)).json()
-  expect(confirmed.feedback.map((row: { kind: string }) => row.kind)).toEqual(['PATIENT', 'VERIFICATION'])
-  expect(confirmed.feedback[1].sourceEncounterId).toBe(completed.encounterId)
+  expect(confirmed.feedback.map((row: { kind: string }) => row.kind)).toEqual(['PATIENT'])
+  expect(JSON.stringify(confirmed)).not.toContain('核对关联接诊记录，复诊已完成。')
+  const internal = await (await get(owner, `/followups/${taskId}`)).json()
+  expect(internal.feedback[1]).toMatchObject({ kind: 'VERIFICATION', sourceEncounterId: completed.encounterId })
   await expect.poll(async () => (await (await get(patient, '/inbox/followup-progress')).json())
     .some((item: { kind: string; objectId: number }) => item.kind === 'FOLLOWUP_VERIFIED' && item.objectId === taskId)).toBe(true)
   await patientPage.goto('/workspace')
@@ -174,7 +176,7 @@ test('revisit windows apply to booking and rescheduling, including after source 
   const after = await slot(mainDoctor.id, '2098-04-06T16:00:00Z')
   const remaining = (id: number) => Number(runSql('select remaining from schedule_slot where id = ' + id))
   const registeredEpisode = await post(owner, '/episodes', {
-    patientId: directory.patients[0].id, reference: 'WINDOW-' + randomUUID(), careDate: '2026-11-21',
+    patientReference: 'DEMO-A', patientName: '患者甲', reference: 'WINDOW-' + randomUUID(), careDate: '2026-11-21',
   })
   expect(registeredEpisode.status()).toBe(201)
   const episodeId = (await registeredEpisode.json()).id

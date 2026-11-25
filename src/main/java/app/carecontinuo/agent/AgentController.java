@@ -5,7 +5,6 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import java.security.Principal;
-import java.util.List;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -33,7 +32,7 @@ class AgentController {
     }
 
     @GetMapping("/episodes/{id}/agent-jobs")
-    List<AgentJobs.View> list(Principal principal, @PathVariable long id) {
+    AgentJobs.JobList list(Principal principal, @PathVariable long id) {
         return jobs.list(accounts.actor(principal), id);
     }
 

@@ -1,7 +1,14 @@
 services:
+  api:
+    environment:
+      CARE_AGENT_ENABLED: "true"
   agent:
     secrets:
       - openai_api_key
+
+networks:
+  model:
+    internal: false
 
 secrets:
   openai_api_key:

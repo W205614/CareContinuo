@@ -54,7 +54,7 @@ async function prepare(owner: Session, reviewer: Session, title: string, plan: o
                        pdf?: { pages: string[][]; quote: string }) {
   const directory = await (await get(owner, '/care-directory')).json()
   const response = await post(owner, '/episodes', {
-    patientId: directory.patients[0].id, reference: 'PRODUCT-' + randomUUID(), careDate: shanghaiDate(new Date().toISOString()),
+    patientReference: 'DEMO-A', patientName: '患者甲', reference: 'PRODUCT-' + randomUUID(), careDate: shanghaiDate(new Date().toISOString()),
   })
   expect(response.status()).toBe(201)
   const episodeId = (await response.json()).id as number
