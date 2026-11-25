@@ -278,6 +278,18 @@ public class Appointments {
     record StopResult(long slotId, String status, int affected) { }
 
     List<StopFollowup> stopped(Actor actor, boolean processed, Long appointmentId) {
+        return stoppedRows(actor, processed, appointmentId, null, null, 100);
+    }
+
+    StopPage stoppedPage(Actor actor, boolean processed, OffsetDateTime afterStart, Long afterId) {
+        if ((afterStart == null) != (afterId == null)) throw Problems.invalid("停诊清单分页参数不完整。");
+        var rows = stoppedRows(actor, processed, null, afterStart, afterId, 51);
+        StopFollowup last = rows.size() > 50 ? rows.get(49) : null;
+        return new StopPage(rows.stream().limit(50).toList(), last == null ? null : new StopCursor(last.startsAt(), last.id()));
+    }
+
+    private List<StopFollowup> stoppedRows(Actor actor, boolean processed, Long appointmentId,
+                                           OffsetDateTime afterStart, Long afterId, int limit) {
         Schedule.requireOperations(actor);
         return Schedule.scoped(jdbc.sql("""
                 select a.id, a.status, s.starts_at, p.name as department, patient.display_name as patient_name,
@@ -295,9 +307,11 @@ public class Appointments {
                 left join lateral (select contacted_at, outcome from stop_contact
                     where appointment_id = a.id order by id desc limit 1) c on true
                 where w.kind = 'STOPPED_APPOINTMENT' and
-                    (cast(:id as bigint) is null and w.status = :status or a.id = :id) and
-                """ + Schedule.STAFF_SCOPE + " order by s.starts_at, a.id limit 100")
-                .param("status", processed ? "DONE" : "OPEN").param("id", appointmentId), actor)
+                    (cast(:id as bigint) is null and w.status = :status or a.id = :id)
+                    and (cast(:cursor as timestamptz) is null or (s.starts_at, a.id) > (:cursor, :afterId)) and
+                """ + Schedule.STAFF_SCOPE + " order by s.starts_at, a.id limit :limit")
+                .param("status", processed ? "DONE" : "OPEN").param("id", appointmentId)
+                .param("cursor", afterStart).param("afterId", afterId).param("limit", limit), actor)
                 .query(StopFollowup.class).list();
     }
 
@@ -368,6 +382,9 @@ public class Appointments {
         return Schedule.scoped(jdbc.sql(VIEW + " where a.id = :id and " + STOP_AFFECTED + " and "
                 + Schedule.STAFF_SCOPE).param("id", id), actor).query(Appointment.class).optional().orElseThrow(Problems::missing);
     }
+
+    record StopPage(List<StopFollowup> rows, StopCursor nextCursor) { }
+    record StopCursor(OffsetDateTime startsAt, long id) { }
 
     record StopFollowup(long id, String status, OffsetDateTime startsAt, String department, String patientName,
                         String stopReason, OffsetDateTime messageAt, OffsetDateTime readAt, OffsetDateTime contactedAt,

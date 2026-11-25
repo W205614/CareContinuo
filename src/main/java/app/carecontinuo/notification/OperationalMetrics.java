@@ -1,4 +1,4 @@
-package app.carecontinuo.common;
+package app.carecontinuo.notification;
 
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -13,8 +13,12 @@ class OperationalMetrics {
     OperationalMetrics(MeterRegistry registry, JdbcClient jdbc) {
         Gauge.builder("care.outbox.oldest.ready.seconds", jdbc, connection -> read(connection, """
                 select coalesce(extract(epoch from clock_timestamp() - min(available_at)), 0)
-                from outbox_event where state = 'PENDING' and available_at <= clock_timestamp()
-                """)).register(registry);
+                from outbox_event e where state = 'PENDING' and available_at <= clock_timestamp() and not
+                """ + Notifications.BLOCKED_BY_CONFLICT)).register(registry);
+        Gauge.builder("care.outbox.waiting.review", jdbc, connection -> read(connection, """
+                select count(*) from outbox_event e
+                where state = 'PENDING' and available_at <= clock_timestamp() and
+                """ + Notifications.BLOCKED_BY_CONFLICT)).register(registry);
         Gauge.builder("care.outbox.failed", jdbc, connection -> read(connection, """
                 select count(*) from outbox_event where state = 'FAILED'
                 """)).register(registry);

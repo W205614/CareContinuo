@@ -106,6 +106,34 @@ test('AC-04 stopping an active schedule includes previously confirmed reservatio
   await expect(page.locator(`[data-appointment-id="${one.id}"]`)).toContainText('合成停诊演示')
 })
 
+test('stopped appointment queue pages past one hundred affected patients', async () => {
+  const operations = await signedIn('operations')
+  const slot = await createSlot(operations, 60 * 24 * 90, 101)
+  const prefix = 'STOP-' + randomUUID()
+  runSql(`
+    with people as (
+      insert into patient(reference, display_name)
+        select '${prefix}-' || number, '${prefix}-' || number from generate_series(1, 101) number returning id
+    )
+    insert into appointment(patient_id, slot_id, status) select id, ${slot}, 'BOOKED' from people;
+    update schedule_slot set remaining = 0 where id = ${slot};
+  `)
+  expect((await post(operations, `/schedule-slots/${slot}/stop`, { reason: '合成分页验收' })).status()).toBe(204)
+  const seen: number[] = []
+  let path = '/appointments/stopped/page'
+  for (let pageNumber = 0; pageNumber < 5; pageNumber++) {
+    const response = await get(operations, path)
+    expect(response.ok()).toBe(true)
+    const { rows, nextCursor } = await response.json()
+    seen.push(...rows.filter((row: { patientName: string }) => row.patientName.startsWith(prefix)).map((row: { id: number }) => row.id))
+    if (!nextCursor) break
+    path = '/appointments/stopped/page?' + new URLSearchParams({ afterStart: nextCursor.startsAt, afterId: String(nextCursor.id) })
+  }
+  expect(seen).toHaveLength(101)
+  expect(new Set(seen).size).toBe(101)
+  runSql(`delete from work_item where kind = 'STOPPED_APPOINTMENT' and object_id in (${seen.join(',')});`)
+})
+
 test('operator can publish an appointment slot from the workspace', async ({ page }) => {
   const scheduleReady = Promise.withResolvers<void>()
   await page.route('**/api/v1/schedule', async (route) => {

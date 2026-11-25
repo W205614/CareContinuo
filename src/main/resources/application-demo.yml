@@ -1,4 +1,8 @@
 care:
+  synthetic-discharges:
+    enabled: true
+  documents:
+    pdf-enabled: true
   demo:
     unrestricted-staff: true
   jobs:

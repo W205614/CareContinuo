@@ -12,7 +12,7 @@
 `./mvnw.cmd spring-boot:run`。Flyway 初始化该库，API 监听 8080。
 
 在 `agent` 执行 `uv run --locked uvicorn app.main:app --port 8000`。在 `web` 执行
-`npm ci` 及 `npm run dev`，使用 Vite 输出的本机地址。Vite 将 `/api` 转给 8080。没有模型密钥时可走人工随访。
+`npm ci` 及 `npm run dev`，使用 Vite 输出的本机地址。Vite 将 `/api` 转给 8080。Agent 默认停用，人工填写草稿后仍可审核派发。宿主源码开发验证合成资料的模型调用时，为 API 进程设置 `CARE_AGENT_ENABLED=true`，并通过 Agent 的密钥文件配置模型。
 使用 macOS/Linux 的 `export` 或 Windows PowerShell 的 `$env:` 为各进程配置环境。开发库、演示库和预生产库应分别使用。
 
 ## 测试

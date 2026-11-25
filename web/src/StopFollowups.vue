@@ -15,12 +15,16 @@ interface Contact {
   callbackOwner: string | null; callbackDueAt: string | null
 }
 interface Assignee { id: number; name: string }
+interface StopCursor { startsAt: string; id: number }
+interface StopPage { rows: StoppedAppointment[]; nextCursor: StopCursor | null }
 
 const props = defineProps<{ appointmentId?: number; refreshVersion: number; actorId: number }>()
 const emit = defineEmits<{ changed: [] }>()
 const outcomes: Record<string, string> = { REACHED: '已联系到患者', NO_ANSWER: '未接通', CALL_BACK: '约定回电' }
 const processed = ref(false)
 const rows = ref<StoppedAppointment[]>([])
+const nextCursor = ref<StopCursor | null>(null)
+const pages = ref<(StopCursor | null)[]>([null])
 const selectedId = ref<number>()
 const contacts = ref<Contact[]>([])
 const outcome = ref('REACHED')
@@ -32,11 +36,27 @@ const canRecordOutcome = computed(() => selected.value?.callbackStatus !== 'OPEN
 const note = ref('')
 const busy = ref(false)
 const error = ref('')
+let refreshVersion = 0
 
 async function refresh() {
-  const path = '/appointments/stopped?processed=' + processed.value
+  const version = ++refreshVersion
+  const query = new URLSearchParams({ processed: String(processed.value) })
   const id = props.appointmentId
-  rows.value = await api<StoppedAppointment[]>(path + (id ? '&appointmentId=' + id : ''))
+  if (id) {
+    query.set('appointmentId', String(id))
+    const detail = await api<StoppedAppointment[]>('/appointments/stopped?' + query)
+    if (version === refreshVersion) rows.value = detail
+    return
+  }
+  const cursor = pages.value.at(-1)
+  if (cursor) {
+    query.set('afterStart', cursor.startsAt)
+    query.set('afterId', String(cursor.id))
+  }
+  const page = await api<StopPage>('/appointments/stopped/page?' + query)
+  if (version !== refreshVersion) return
+  rows.value = page.rows
+  nextCursor.value = page.nextCursor
 }
 
 async function openContacts(id: number) {
@@ -75,6 +95,15 @@ async function record(id: number) {
   finally { busy.value = false }
 }
 
+async function changePage(forward: boolean) {
+  if (forward && nextCursor.value) pages.value.push(nextCursor.value)
+  else if (!forward && pages.value.length > 1) pages.value.pop()
+  selectedId.value = undefined
+  busy.value = true
+  try { await load() }
+  finally { busy.value = false }
+}
+
 async function load() {
   error.value = ''
   try {
@@ -84,9 +113,11 @@ async function load() {
 }
 
 watch([() => props.appointmentId, processed], async ([id]) => {
+  pages.value = [null]
+  nextCursor.value = null
   selectedId.value = undefined
   await load()
-  if (!id) return
+  if (!id || props.appointmentId !== id) return
   if (rows.value.some((row) => row.id === id)) await openContacts(id)
   else error.value = '无法查看此停诊预约。'
   await nextTick()
@@ -150,5 +181,9 @@ watch(() => props.refreshVersion, load)
         </div>
       </li>
     </ul>
+    <div v-if="!appointmentId && (nextCursor || pages.length > 1)" class="row-actions">
+      <button type="button" class="secondary" :disabled="busy || pages.length === 1" @click="changePage(false)">上一页</button>
+      <button type="button" class="secondary" :disabled="busy || !nextCursor" @click="changePage(true)">下一页</button>
+    </div>
   </section>
 </template>

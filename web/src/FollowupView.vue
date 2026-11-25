@@ -21,7 +21,7 @@ const tasks = ref<Followup[]>([])
 const historyClosed = ref('')
 const historyKind = ref('')
 const historyCursor = ref<number | null>(null)
-const directory = ref<Directory>({ patients: [], reviewers: [], owners: [], departments: [] })
+const directory = ref<Directory>({ reviewers: [], owners: [], departments: [], syntheticDischarges: false, pdfEnabled: false })
 const departments = ref<Schedule['departments']>([])
 const episodeId = ref(0)
 const documents = ref<DocumentVersion[]>([])
@@ -33,7 +33,7 @@ const notice = ref('')
 const bookingError = ref('')
 const bookingNotice = ref('')
 const busy = ref(false)
-const discharge = ref({ patientId: 0, departmentId: 0, reference: '', careDate: '' })
+const discharge = ref({ patientReference: '', patientName: '', departmentId: 0, reference: '', careDate: '' })
 const doc = ref({ documentId: 0, title: '', text: '' })
 const selectedFile = ref<File>()
 const fileKey = ref(0)
@@ -87,7 +87,6 @@ async function refresh() {
     directory.value = choices
     if (schedule) departments.value = schedule.departments
     draft.value.reviewerId ||= choices.reviewers[0]?.id ?? 0
-    discharge.value.patientId ||= choices.patients[0]?.id ?? 0
     discharge.value.departmentId ||= choices.departments[0]?.id ?? 0
   }
 }
@@ -114,21 +113,33 @@ async function run(write: () => Promise<unknown>, message: string) {
 }
 
 async function chooseEpisode(id: number) {
-  if (episodeId.value !== id) draft.value.segmentIds = []
+  if (episodeId.value !== id) {
+    draft.value.segmentIds = []
+    doc.value = { documentId: 0, title: '', text: '' }
+    selectedFile.value = undefined
+    fileKey.value++
+    documents.value = []
+    sources.value = []
+  }
   episodeId.value = id
-  if (!id) { documents.value = []; sources.value = []; return }
+  if (!id) return
   try {
     const [files, snippets] = await Promise.all([
       api<DocumentVersion[]>(`/episodes/${id}/documents`), api<Source[]>(`/episodes/${id}/segments`),
     ])
+    if (episodeId.value !== id) return
     documents.value = files
     sources.value = snippets
-  } catch (failure) { error.value = (failure as Error).message }
+  } catch (failure) {
+    if (episodeId.value === id) error.value = (failure as Error).message
+  }
 }
 
 function addEpisode() {
   return run(async () => {
     const created = await mutate<{ id: number }>('/episodes', discharge.value)
+    discharge.value.patientReference = ''
+    discharge.value.patientName = ''
     discharge.value.reference = ''
     await chooseEpisode(created.id)
   }, '出院记录已登记。')
@@ -363,10 +374,11 @@ async function requestChanged() {
     <p v-if="notice" role="status">{{ notice }}</p>
     <p v-if="patient">留言由医护在工作日 09:00–17:00（北京时间）查看。紧急情况请使用当地急救服务。</p>
     <div v-if="followup" class="followup-forms">
-      <details>
+      <details v-if="directory.syntheticDischarges">
         <summary>登记合成出院记录</summary>
         <form class="field-grid" @submit.prevent="addEpisode">
-          <label>患者<select v-model.number="discharge.patientId" required><option v-for="item in directory.patients" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
+          <label>患者编号<input v-model.trim="discharge.patientReference" maxlength="100" required /></label>
+          <label>患者姓名<input v-model.trim="discharge.patientName" maxlength="100" required /></label>
           <label>资料科室<select v-model.number="discharge.departmentId" required><option v-for="item in directory.departments" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
           <label>出院记录编号<input v-model.trim="discharge.reference" maxlength="100" required /></label>
           <label>出院日期<input v-model="discharge.careDate" type="date" required /></label>
@@ -380,11 +392,13 @@ async function requestChanged() {
           <form class="field-grid" @submit.prevent="addDocument">
             <label>资料操作<select v-model.number="doc.documentId"><option :value="0">新增资料</option><option v-for="item in currentDocuments" :key="item.id" :value="item.id">更正 {{ item.title }}</option></select></label>
             <label>资料标题<input v-model.trim="doc.title" maxlength="200" :required="!selectedFile" /></label>
-            <label>UTF-8 文本或文本 PDF<input :key="fileKey" type="file" accept=".txt,.pdf" @change="selectedFile = ($event.target as HTMLInputElement).files?.[0]" /></label>
+            <label>{{ directory.pdfEnabled ? 'UTF-8 文本或文本 PDF' : 'UTF-8 文本' }}<input :key="fileKey" type="file"
+              :accept="directory.pdfEnabled ? '.txt,.pdf' : '.txt'" @change="selectedFile = ($event.target as HTMLInputElement).files?.[0]" /></label>
             <label v-if="!selectedFile">手工录入原文<textarea v-model="doc.text" required /></label>
             <button :disabled="busy">保存资料版本</button>
           </form>
-          <ul class="record-list"><li v-for="item in documents" :key="item.versionId" class="record"><span>{{ item.title }} · 版本 {{ item.versionNumber }}</span><a :href="`/api/v1/episodes/${episodeId}/versions/${item.versionId}/download`">下载附件</a></li></ul>
+          <ul class="record-list"><li v-for="item in documents" :key="item.versionId" class="record"><span>{{ item.title }} · 版本 {{ item.versionNumber }}</span><a v-if="directory.pdfEnabled || !item.filename.toLowerCase().endsWith('.pdf')"
+            :href="`/api/v1/episodes/${episodeId}/versions/${item.versionId}/download`">下载附件</a></li></ul>
         </details>
         <div id="episode-work"><AgentSuggestions :episode-id="episodeId" :source-version="sourceVersion" @use="adopt" /></div>
         <form class="panel draft-form" @submit.prevent="saveDraft">
@@ -438,9 +452,9 @@ async function requestChanged() {
     <article v-if="detail" id="followup-target" tabindex="-1" class="panel followup-detail">
       <RouterLink v-if="taskId" :to="{ path: '/workspace' }">返回工作区</RouterLink>
       <h3>{{ detail.title }}</h3>
-      <p>{{ followupStates[detail.status] }} · 完成期限 {{ shanghaiTime(detail.dueAt) }}</p>
+      <p>{{ followupStates[detail.status] }}<template v-if="!patient || detail.status !== 'CLOSED'"> · 完成期限 {{ shanghaiTime(detail.dueAt) }}</template></p>
       <p v-if="detail.needsReview">资料已更正，等待医护确认。</p>
-      <p v-if="detail.revisitFrom && (!patient || !detail.needsReview)">
+      <p v-if="detail.revisitFrom && (!patient || (!detail.needsReview && detail.status !== 'CLOSED'))">
         复诊安排 · {{ detail.revisitDepartment }} · {{ detail.revisitFrom }}<template v-if="detail.revisitFrom !== detail.revisitTo"> 至 {{ detail.revisitTo }}</template>
       </p>
       <AgentSuggestions v-if="canReview" :episode-id="detail.episodeId"
@@ -501,7 +515,7 @@ async function requestChanged() {
           :to="{ path: '/workspace', query: { appointment: changeVisit.appointmentId } }">查看或取消原预约</RouterLink>
       </section>
       <FollowupRequests :key="detail.id" :task="detail" :patient="patient" :active="active"
-        :can-manage="canManage" :can-ask="canAsk" :appointment-id="changeVisit?.appointmentId" :shown-request-id="selectedReply?.status === 'RESOLVED' ? selectedReply.id : undefined" @changed="requestChanged" />
+        :can-manage="canManage" :can-ask="canAsk" :demo="actor.demo" :appointment-id="changeVisit?.appointmentId" :shown-request-id="selectedReply?.status === 'RESOLVED' ? selectedReply.id : undefined" @changed="requestChanged" />
       <div class="row-actions">
         <button v-if="canEdit" type="button" class="secondary" @click="edit(detail)">编辑草稿</button>
         <button v-if="canEdit && detail.status === 'DRAFT'" type="button" :disabled="busy" @click="apply('SUBMIT')">提交审核</button>
@@ -517,7 +531,7 @@ async function requestChanged() {
         <label v-if="action.name === 'VERIFY' && visits.some((item) => item.completedAt)">核实依据<select v-model.number="action.encounterId"><option :value="0">人工核实记录</option><option v-for="item in visits.filter((row) => row.completedAt)" :key="item.appointmentId" :value="item.encounterId">接诊 #{{ item.encounterId }} · {{ shanghaiTime(item.completedAt!) }}</option></select></label>
         <label v-if="action.name === 'TRANSFER'">接手人<select v-model.number="action.newOwnerId" required><option :value="0">选择接手人</option><option v-for="item in directory.owners.filter((item) => item.id !== actor.id)" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
         <label v-if="action.name === 'CLOSE'">结案原因<select v-model="action.closureReason"><option value="UNREACHABLE">无法联系</option><option value="REFUSED">患者拒绝</option><option value="WRONG_TASK">任务录错</option></select></label>
-        <label>处理依据<textarea v-model.trim="action.note" maxlength="2000" required /></label>
+        <label>{{ action.name === 'VERIFY' ? '处理依据（仅医护可见）' : '处理依据' }}<textarea v-model.trim="action.note" maxlength="2000" required /></label>
         <button :disabled="busy">确认提交</button>
       </form>
     </article>

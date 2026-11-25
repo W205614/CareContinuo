@@ -36,7 +36,7 @@ public class Notifications {
             where m.recipient_user_id = :actor
             """;
 
-    private static final String BLOCKED_BY_CONFLICT = """
+    static final String BLOCKED_BY_CONFLICT = """
             exists(select 1 from care_episode ep join agent_job j on j.episode_id = ep.id
               join followup_revision r on r.source_version = ep.source_version
               where ep.id = e.episode_id and r.id = e.revision_id
@@ -204,7 +204,7 @@ public class Notifications {
                   join followup_revision r on r.id = t.published_revision_id and r.source_version = e.source_version
                   where t.id = ? and r.id = ? and not t.needs_review
                     and (t.status in ('DISPATCHED', 'PATIENT_REPLIED')
-                    or (? not in ('FOLLOWUP_DUE', 'FOLLOWUP_SLOT_AVAILABLE') and t.status in ('VERIFIED', 'CLOSED'))))
+                    or (? not in ('FOLLOWUP_DUE', 'FOLLOWUP_SLOT_AVAILABLE') and t.status = 'VERIFIED')))
                 """).params(event.objectId(), event.revisionId(), event.kind()).query(Boolean.class).single();
     }
 

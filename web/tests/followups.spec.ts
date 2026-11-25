@@ -5,7 +5,7 @@ import { book, createSlot, get, loginInBrowser, post, runSql, signedIn, type Ses
 async function setup(owner: Session) {
   const options = await (await get(owner, '/care-directory')).json()
   const registered = await post(owner, '/episodes', {
-    patientId: options.patients.find((item: { name: string }) => item.name === '患者甲').id,
+    patientReference: 'DEMO-A', patientName: '患者甲',
     reference: `TEST-${randomUUID()}`, careDate: new Date().toISOString().slice(0, 10),
   })
   expect(registered.status()).toBe(201)
@@ -82,6 +82,55 @@ test('AC-05 and AC-09 document changes invalidate the old approval and link pati
   }
   await expect.poll(async () => (await (await get(patient, `/inbox/${original.id}`)).json()).replacementId).not.toBeNull()
   expect((await (await get(patient, `/followups/${id}`)).json()).instructions).toContain('最终日期')
+})
+
+test('discharge registration requires a matching patient number and name', async ({ page }) => {
+  await loginInBrowser(page, 'followup')
+  await page.getByText('登记合成出院记录', { exact: true }).click()
+  await expect(page.getByLabel('患者编号')).toHaveValue('')
+  await page.getByLabel('患者编号').fill('DEMO-A')
+  await page.getByLabel('患者姓名').fill('患者乙')
+  await page.getByLabel('出院记录编号').fill('IDENTITY-' + randomUUID())
+  await page.getByLabel('出院日期').fill('2026-01-01')
+  await page.getByRole('button', { name: '登记出院记录' }).click()
+  await expect(page.getByRole('alert')).toContainText('患者编号和姓名不匹配')
+  await page.getByLabel('患者姓名').fill('患者甲')
+  await page.getByRole('button', { name: '登记出院记录' }).click()
+  await expect(page.getByRole('status')).toContainText('出院记录已登记')
+})
+
+test('late source correction reopens verification and closure ends patient reminders', async () => {
+  const [owner, reviewer, patient] = await Promise.all(['followup', 'doctor', 'patient-a'].map(signedIn))
+  const { episodeId, reviewerId } = await setup(owner)
+  const created = await post(owner, '/followups', { episodeId, reviewerId,
+    draft: draft([], '待核实的合成检查', '此前发布的合成随访说明') })
+  expect(created.status()).toBe(201)
+  const { id } = await created.json()
+  for (const [session, name] of [[owner, 'SUBMIT'], [reviewer, 'APPROVE'], [reviewer, 'DISPATCH']] as const) {
+    expect((await action(session, id, name, 1)).status()).toBe(204)
+  }
+  expect((await action(owner, id, 'VERIFY', 1, { note: '内部依据仅医护可见' })).status()).toBe(204)
+  const path = `/followups/${id}`
+  const before = await (await get(patient, path)).json()
+  expect(before.status).toBe('VERIFIED')
+  expect(JSON.stringify(before)).not.toContain('内部依据仅医护可见')
+  const readInbox = async () => (await (await get(patient, '/inbox')).json()) as {
+    id: number; kind: string; objectId: number; correctedAt: string | null
+  }[]
+  const verificationMessage = async () => (await readInbox())
+    .find(message => message.objectId === id && message.kind === 'FOLLOWUP_VERIFIED')
+  await expect.poll(async () => !!(await verificationMessage())).toBe(true)
+  expect((await post(owner, `/episodes/${episodeId}/documents`, { title: '新资料', text: '检查结果来源已经更正。' })).status()).toBe(201)
+  expect((await verificationMessage())?.correctedAt).toBeTruthy()
+  expect(await (await get(patient, path)).json()).toMatchObject({ status: 'UNDER_CORRECTION', instructions: null })
+  expect((await action(owner, id, 'CLOSE', 1, { closureReason: 'WRONG_TASK', note: '原任务已撤回' })).status()).toBe(204)
+  expect(await (await get(patient, path)).json()).toMatchObject({ status: 'CLOSED', needsReview: false, instructions: null })
+  expect(await (await get(patient, '/followups?actionable=true')).json()).not.toEqual(expect.arrayContaining([
+    expect.objectContaining({ id }),
+  ]))
+  expect((await (await get(patient, '/followups/history?closed=true')).json()).tasks).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id, status: 'CLOSED' }),
+  ]))
 })
 
 test('AC-08 an overdue task can be transferred and closed with its history', async () => {

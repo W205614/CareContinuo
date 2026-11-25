@@ -11,6 +11,7 @@ import java.time.Clock;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.List;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
@@ -38,13 +39,19 @@ public class Episodes {
     private final Notifications notices;
     private final Clock clock;
     private final Accounts accounts;
+    private final boolean syntheticDischarges;
+    private final boolean pdfEnabled;
 
-    Episodes(JdbcClient jdbc, AuditLog audit, Notifications notices, Clock clock, Accounts accounts) {
+    Episodes(JdbcClient jdbc, AuditLog audit, Notifications notices, Clock clock, Accounts accounts,
+             @Value("${care.synthetic-discharges.enabled:false}") boolean syntheticDischarges,
+             @Value("${care.documents.pdf-enabled:false}") boolean pdfEnabled) {
         this.jdbc = jdbc;
         this.audit = audit;
         this.notices = notices;
         this.clock = clock;
         this.accounts = accounts;
+        this.syntheticDischarges = syntheticDischarges;
+        this.pdfEnabled = pdfEnabled;
     }
 
     public List<Episode> list(Actor actor) {
@@ -71,9 +78,6 @@ public class Episodes {
 
     public Directory directory(Actor actor) {
         requireClinical(actor);
-        var patients = actor.has("FOLLOWUP") && (actor.demo() || !actor.departmentIds().isEmpty())
-                ? jdbc.sql("select id, display_name as name from patient order by id limit 100").query(Choice.class).list()
-                : List.<Choice>of();
         var reviewers = accountChoices(actor, "REVIEWER");
         var owners = accountChoices(actor, "FOLLOWUP");
         var departments = jdbc.sql("""
@@ -81,14 +85,15 @@ public class Episodes {
                     select 1 from staff_department sd where sd.user_id = :staff and sd.department_id = d.id))
                 order by name
                 """).param("demo", actor.demo()).param("staff", actor.id()).query(Choice.class).list();
-        return new Directory(patients, reviewers, owners, departments);
+        return new Directory(reviewers, owners, departments,
+                syntheticDischarges && actor.has("FOLLOWUP"), pdfEnabled);
     }
 
     @Transactional
-    public long registerDischarge(Actor actor, long patientId, String reference, LocalDate dischargeDate,
-                                  Long selectedDepartment) {
+    public long registerDischarge(Actor actor, String patientReference, String patientName, String reference,
+                                  LocalDate dischargeDate, Long selectedDepartment) {
         Actor current = accounts.actorById(actor.id());
-        if (!current.has("FOLLOWUP")) throw Problems.forbidden();
+        if (!syntheticDischarges || !current.has("FOLLOWUP")) throw Problems.forbidden();
         if (selectedDepartment == null && !current.demo()) throw Problems.invalid("请选择本科室出院资料。");
         long departmentId = jdbc.sql("""
                 select id from department where enabled and
@@ -98,9 +103,10 @@ public class Episodes {
         try {
             long id = jdbc.sql("""
                     insert into care_episode(patient_id, owner_id, kind, reference, care_date, department_id)
-                    select id, ?, 'DISCHARGE', ?, ?, ? from patient where id = ? returning id
-                    """).params(actor.id(), reference, dischargeDate, departmentId, patientId).query(Long.class)
-                    .optional().orElseThrow(Problems::missing);
+                    select id, ?, 'DISCHARGE', ?, ?, ? from patient
+                    where reference = ? and display_name = ? returning id
+                    """).params(actor.id(), reference, dischargeDate, departmentId, patientReference, patientName)
+                    .query(Long.class).optional().orElseThrow(() -> Problems.invalid("患者编号和姓名不匹配。"));
             audit.record(actor.id(), "EPISODE", id, "REGISTER_DISCHARGE");
             return id;
         } catch (DuplicateKeyException conflict) {
@@ -190,6 +196,7 @@ public class Episodes {
                 select v.filename, v.media_type, v.content from document_version v
                 join source_document s on s.id = v.document_id where s.episode_id = ? and v.id = ?
                 """).params(episodeId, versionId).query(Attachment.class).optional().orElseThrow(Problems::missing);
+        if (!pdfEnabled && attachment.mediaType().equals("application/pdf")) throw Problems.missing();
         audit.record(actor.id(), "DOCUMENT_VERSION", versionId, "DOWNLOAD");
         return attachment;
     }
@@ -206,6 +213,9 @@ public class Episodes {
         requireEditor(actor, id);
         String name = upload.getOriginalFilename();
         if (name == null || name.isBlank() || upload.isEmpty()) throw Problems.invalid("请选择一个资料文件。");
+        if (!pdfEnabled && !name.toLowerCase(java.util.Locale.ROOT).endsWith(".txt")) {
+            throw Problems.invalid("当前配置仅允许 UTF-8 文本附件。");
+        }
         return store(actor, id, documentId, title, DocumentText.extract(name, upload.getBytes()));
     }
 
@@ -250,7 +260,7 @@ public class Episodes {
                 """).params(episodeId, episodeId).update();
         var tasks = jdbc.sql("""
                 update followup_task set status = 'DRAFT', needs_review = published_revision_id is not null
-                where episode_id = ? and status not in ('CLOSED', 'VERIFIED') returning id, owner_id
+                where episode_id = ? and status <> 'CLOSED' returning id, owner_id
                 """).param(episodeId).query(Invalidated.class).list();
         var now = OffsetDateTime.now(clock);
         for (var task : tasks) {
@@ -295,7 +305,8 @@ public class Episodes {
     public record Episode(long id, long patientId, String patient, long ownerId, String kind, String reference,
                           LocalDate careDate, int sourceVersion, long departmentId) { }
     public record Choice(long id, String name) { }
-    public record Directory(List<Choice> patients, List<Choice> reviewers, List<Choice> owners, List<Choice> departments) { }
+    public record Directory(List<Choice> reviewers, List<Choice> owners, List<Choice> departments,
+                            boolean syntheticDischarges, boolean pdfEnabled) { }
     public record SourceContext(Segment target, List<SourceLine> lines) { }
     public record SourceLine(long id, int lineNumber, String excerpt) { }
     public record Segment(long id, String title, long versionId, int versionNumber, Integer pageNumber,

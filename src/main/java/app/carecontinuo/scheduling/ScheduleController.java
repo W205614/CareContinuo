@@ -91,6 +91,13 @@ class ScheduleController {
         return appointments.history(accounts.actor(principal), status, afterId);
     }
 
+    @GetMapping("/appointments/stopped/page")
+    Appointments.StopPage stoppedPage(Principal principal, @RequestParam(defaultValue = "false") boolean processed,
+                                      @RequestParam(required = false) OffsetDateTime afterStart,
+                                      @RequestParam(required = false) @Positive Long afterId) {
+        return appointments.stoppedPage(accounts.actor(principal), processed, afterStart, afterId);
+    }
+
     @GetMapping("/appointments/stopped")
     List<Appointments.StopFollowup> stopped(Principal principal, @RequestParam(defaultValue = "false") boolean processed,
                                            @RequestParam(required = false) Long appointmentId) {

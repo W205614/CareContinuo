@@ -60,7 +60,8 @@ services:
 networks:
   data:
     internal: true
-  model: {}
+  model:
+    internal: true
   browser: {}
 
 volumes:

@@ -149,8 +149,8 @@ test('AC-10–12 OIDC MFA, scoped handoff and API replica failover', async ({ br
   const ownerId = (await (await owner.api.get('/api/v1/session')).json()).id
   const reviewerId = (await (await reviewer.api.get('/api/v1/session')).json()).id
   const newOwner = (await (await replacement.api.get('/api/v1/session')).json()).id
-  const patientId = Number(sql("select id from patient where reference = 'SYN-1'"))
-  const record = { patientId, reference: randomUUID(), careDate: '2026-01-01', departmentId: department }
+  const record = { patientReference: 'SYN-1', patientName: 'Synthetic Patient 1',
+    reference: randomUUID(), careDate: '2026-01-01', departmentId: department }
   expect((await post(owner.api, '/episodes', { ...record, departmentId: otherDept })).status()).toBe(404)
   const episodeResponse = await post(owner.api, '/episodes', record)
   expect(episodeResponse.status()).toBe(201)
@@ -192,6 +192,9 @@ test('AC-10–12 OIDC MFA, scoped handoff and API replica failover', async ({ br
   expect((await post(reviewer.api, actions, { action: 'APPROVE', version: 1 })).status()).toBe(204)
   const staffPath = '/admin/staff/' + ownerId
   const staffInput = { displayName: 'followup-a', roles: ['FOLLOWUP'], departmentIds: [department] }
+  expect((await post(admin.api, staffPath, { ...staffInput, enabled: true, roles: ['FOLLOWUP', 'REVIEWER'] })).status()).toBe(204)
+  expect((await post(admin.api, '/admin/followups/' + task + '/reassign',
+    { ownerId: newOwner, reviewerId: ownerId })).status()).toBe(409)
   expect((await post(admin.api, staffPath, { ...staffInput, enabled: false })).status()).toBe(204)
   try {
     expect((await owner.api.get('/api/v1/session')).status()).toBe(401)

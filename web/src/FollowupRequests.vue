@@ -6,7 +6,7 @@ import { fromShanghaiInput, shanghaiTime } from './time'
 import DepartmentTemplates from './DepartmentTemplates.vue'
 import RevisitAssistanceForm from './RevisitAssistanceForm.vue'
 
-const props = defineProps<{ task: Followup; patient: boolean; active: boolean; canManage: boolean; canAsk: boolean; appointmentId?: number; shownRequestId?: number }>()
+const props = defineProps<{ task: Followup; patient: boolean; active: boolean; canManage: boolean; canAsk: boolean; demo: boolean; appointmentId?: number; shownRequestId?: number }>()
 const emit = defineEmits<{ changed: [] }>()
 const feedback = ref(false)
 const category = ref('QUESTION')
@@ -88,13 +88,13 @@ async function publishResult() {
     <h4>协助与反馈</h4>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <p v-if="notice" role="status">{{ notice }}</p>
-    <template v-if="task.kind === 'PENDING_RESULT'">
+    <template v-if="task.kind === 'PENDING_RESULT' && (!patient || task.status !== 'CLOSED')">
       <p id="followup-result-progress" tabindex="-1"><strong>检查结果进度 · {{ task.needsReview ? '等待医护确认新版' : result ? resultLabels[result.stage] : '等待结果' }}</strong></p>
       <p v-if="result?.patientMessage" class="preserve-lines">{{ result.patientMessage }}</p>
       <button v-if="active && canManage && !editingResult" class="secondary" type="button" @click="editingResult = true">更新检查结果进度</button>
       <form v-if="active && canManage && editingResult" class="field-grid" @submit.prevent="publishResult">
         <label>检查结果进度<select v-model="resultStage"><option v-for="(label, key) in resultLabels" :key="key" :value="key">{{ label }}</option></select></label>
-        <label>患者可见说明<textarea v-model.trim="resultMessage" maxlength="2000" :required="resultStage === 'PLAN_AVAILABLE'" /></label>
+        <label v-if="demo">患者可见说明<textarea v-model.trim="resultMessage" maxlength="2000" :required="resultStage === 'PLAN_AVAILABLE'" /></label>
         <button :disabled="busy">发布进度</button>
       </form>
     </template>

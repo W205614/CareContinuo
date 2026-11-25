@@ -4,7 +4,7 @@ import { book, createSlot, get, loginInBrowser, post, runSql, signedIn, type Ses
 
 async function episode(owner: Session, text: string) {
   const directory = await (await get(owner, '/care-directory')).json()
-  const response = await post(owner, '/episodes', { patientId: directory.patients[0].id,
+  const response = await post(owner, '/episodes', { patientReference: 'DEMO-A', patientName: '患者甲',
     reference: `AI-${randomUUID()}`, careDate: new Date().toISOString().slice(0, 10) })
   expect(response.status()).toBe(201)
   const { id } = await response.json()
