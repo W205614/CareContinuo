@@ -36,13 +36,16 @@ const canRecordOutcome = computed(() => selected.value?.callbackStatus !== 'OPEN
 const note = ref('')
 const busy = ref(false)
 const error = ref('')
+let refreshVersion = 0
 
 async function refresh() {
+  const version = ++refreshVersion
   const query = new URLSearchParams({ processed: String(processed.value) })
   const id = props.appointmentId
   if (id) {
     query.set('appointmentId', String(id))
-    rows.value = await api<StoppedAppointment[]>('/appointments/stopped?' + query)
+    const detail = await api<StoppedAppointment[]>('/appointments/stopped?' + query)
+    if (version === refreshVersion) rows.value = detail
     return
   }
   const cursor = pages.value.at(-1)
@@ -51,6 +54,7 @@ async function refresh() {
     query.set('afterId', String(cursor.id))
   }
   const page = await api<StopPage>('/appointments/stopped/page?' + query)
+  if (version !== refreshVersion) return
   rows.value = page.rows
   nextCursor.value = page.nextCursor
 }
@@ -113,7 +117,7 @@ watch([() => props.appointmentId, processed], async ([id]) => {
   nextCursor.value = null
   selectedId.value = undefined
   await load()
-  if (!id) return
+  if (!id || props.appointmentId !== id) return
   if (rows.value.some((row) => row.id === id)) await openContacts(id)
   else error.value = '无法查看此停诊预约。'
   await nextTick()

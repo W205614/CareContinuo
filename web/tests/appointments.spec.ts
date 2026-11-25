@@ -131,7 +131,7 @@ test('stopped appointment queue pages past one hundred affected patients', async
   }
   expect(seen).toHaveLength(101)
   expect(new Set(seen).size).toBe(101)
-  runSql(`update work_item set status = 'DONE' where kind = 'STOPPED_APPOINTMENT' and object_id in (${seen.join(',')});`)
+  runSql(`delete from work_item where kind = 'STOPPED_APPOINTMENT' and object_id in (${seen.join(',')});`)
 })
 
 test('operator can publish an appointment slot from the workspace', async ({ page }) => {
