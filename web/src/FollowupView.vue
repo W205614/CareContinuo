@@ -452,9 +452,9 @@ async function requestChanged() {
     <article v-if="detail" id="followup-target" tabindex="-1" class="panel followup-detail">
       <RouterLink v-if="taskId" :to="{ path: '/workspace' }">返回工作区</RouterLink>
       <h3>{{ detail.title }}</h3>
-      <p>{{ followupStates[detail.status] }} · 完成期限 {{ shanghaiTime(detail.dueAt) }}</p>
+      <p>{{ followupStates[detail.status] }}<template v-if="!patient || detail.status !== 'CLOSED'"> · 完成期限 {{ shanghaiTime(detail.dueAt) }}</template></p>
       <p v-if="detail.needsReview">资料已更正，等待医护确认。</p>
-      <p v-if="detail.revisitFrom && (!patient || !detail.needsReview)">
+      <p v-if="detail.revisitFrom && (!patient || (!detail.needsReview && detail.status !== 'CLOSED'))">
         复诊安排 · {{ detail.revisitDepartment }} · {{ detail.revisitFrom }}<template v-if="detail.revisitFrom !== detail.revisitTo"> 至 {{ detail.revisitTo }}</template>
       </p>
       <AgentSuggestions v-if="canReview" :episode-id="detail.episodeId"
