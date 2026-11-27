@@ -2,7 +2,7 @@
 
 CareContinuo 面向单院多科室的门诊和出院随访。患者可以从同一工作台处理预约、查看医护确认的随访安排，并在复诊后收到核实结果。医护从草稿回到出院资料原文，核对后再派发。运营可以处理放号、停诊及后续联络。
 
-**当前发布版本为 [v0.1.2](https://github.com/W205614/CareContinuo/releases/tag/v0.1.2)，镜像平台为 Linux amd64。** 本版本用于个人日常使用、合成演示和合成预生产。
+**当前发布版本为 [v0.1.3](https://github.com/W205614/CareContinuo/releases/tag/v0.1.3)，镜像平台为 Linux amd64。** 本版本用于个人日常使用、合成演示和合成预生产。
 
 [快速开始](#快速开始) · [完整随访体验](#完整随访体验) · [新版前端实拍](#新版前端实拍) · [架构与代码入口](#架构与代码入口) · [开发与验收](#开发与验收)
 
@@ -22,23 +22,23 @@ CareContinuo 面向单院多科室的门诊和出院随访。患者可以从同�
 
 | 路线 | 何时使用 |
 | --- | --- |
-| [拉取 v0.1.2 镜像](#拉取-v012-镜像) | 直接体验固定版本，免去应用镜像构建 |
+| [拉取 v0.1.3 镜像](#拉取-v013-镜像) | 直接体验固定版本，免去应用镜像构建 |
 | [从源码构建](#从源码构建) | 修改应用，或运行自己检出的源码 |
 | [宿主开发](CONTRIBUTING.md#宿主源码开发) | 使用 Vite 热更新、Java 断点或独立调试 Agent |
 
-### 拉取 v0.1.2 镜像
+### 拉取 v0.1.3 镜像
 
 从空目录开始。下面取得同一版本的源码编排与发布覆盖文件。在 Windows PowerShell 中可用 `curl.exe` 执行下载命令。
 
 ```sh
-git clone --branch v0.1.2 --depth 1 https://github.com/W205614/CareContinuo.git CareContinuo-v0.1.2
-cd CareContinuo-v0.1.2
-curl -fL https://github.com/W205614/CareContinuo/releases/download/v0.1.2/compose.release.yaml -o compose.release.yaml
+git clone --branch v0.1.3 --depth 1 https://github.com/W205614/CareContinuo.git CareContinuo-v0.1.3
+cd CareContinuo-v0.1.3
+curl -fL https://github.com/W205614/CareContinuo/releases/download/v0.1.3/compose.release.yaml -o compose.release.yaml
 docker compose -p carecontinuo-image -f compose.yaml -f compose.release.yaml pull
 docker compose -p carecontinuo-image -f compose.yaml -f compose.release.yaml up --no-build --wait
 ```
 
-启动服务包括 `web`、`api`、`agent` 和 `postgres`。覆盖文件按摘要固定三个 GHCR 应用镜像。数据库使用 Docker Hub 的 `postgres:17.11-alpine`，API 首次启动时应用 Flyway 迁移。发布镜像的源码提交为 [`2696101`](https://github.com/W205614/CareContinuo/commit/26961016f2438eb359ec6b8e5bc0c75d3f58c83b)。 [镜像摘要和第三方材料](https://github.com/W205614/CareContinuo/releases/tag/v0.1.2) · [images.json](https://github.com/W205614/CareContinuo/releases/download/v0.1.2/images.json)
+启动服务包括 `web`、`api`、`agent` 和 `postgres`。覆盖文件按摘要固定三个 GHCR 应用镜像。数据库使用 Docker Hub 的 `postgres:17.11-alpine`，API 首次启动时应用 Flyway 迁移。发布镜像的源码提交为 [`134a486`](https://github.com/W205614/CareContinuo/commit/134a486c474b29e65fb79fdd93aa292a9667624d)。 [镜像摘要和第三方材料](https://github.com/W205614/CareContinuo/releases/tag/v0.1.3) · [images.json](https://github.com/W205614/CareContinuo/releases/download/v0.1.3/images.json)
 
 ### 从源码构建
 
@@ -78,7 +78,7 @@ Compose 按当前检出的文件构建三个应用镜像并启动数据库。本
 
 将模型密钥保存在本机文件中。以下命令以只读方式挂载该文件，请求模型时仅使用合成资料。`OPENAI_MODEL` 默认是 `gpt-6.2-sol`，可按账号可用的模型调整。
 
-**发布镜像路线**在[拉取 v0.1.2 镜像](#拉取-v012-镜像)一节取得的 Tag 目录中执行。保留 `compose.release.yaml` 的固定镜像摘要，追加 `compose.live.yaml` 后，API 接受提取请求，Agent 获得访问模型所需的网络和只读密钥。
+**发布镜像路线**在[拉取 v0.1.3 镜像](#拉取-v013-镜像)一节取得的 Tag 目录中执行。保留 `compose.release.yaml` 的固定镜像摘要，追加 `compose.live.yaml` 后，API 接受提取请求，Agent 获得访问模型所需的网络和只读密钥。
 
 ```powershell
 $env:CARE_OPENAI_KEY_FILE = (Resolve-Path "$env:LOCALAPPDATA/CareContinuo/openai-api-key").Path
@@ -136,6 +136,7 @@ Spring Boot 负责对象授权、号源库存、资料版本和人工审核。�
 
 ## 开发与验收
 
+- **v0.1.3 发布验收**包含院内跨科室随访交接。固定候选镜像通过 32 项浏览器回归和合成预生产。公开镜像匿名拉取后重跑两项 AC-21。日常数据库保留原卷并迁移到 V18。 [GitHub Verify](https://github.com/W205614/CareContinuo/actions/runs/46017321845) · [验收记录](docs/首版验收记录.md#v013-跨科室随访交接验收)
 - **v0.1.2 维护验收**在待发布的三张镜像上通过 30 项浏览器回归，覆盖错配拦截、资料更正后结案和停诊分页。合成预生产补验转派后的独立审核。发布后匿名拉取固定摘要，在隔离库验证人工登记、审核、站内通知和复诊预约。日常 V17 数据卷原地升级，备份在独立 PostgreSQL 容器恢复。 [验收记录](docs/首版验收记录.md#v012-个人日常使用维护验收) · [发布记录与校验文件](https://github.com/W205614/CareContinuo/releases/tag/v0.1.2)
 - **宿主开发**使用 Java 21、Python 3.13 与 uv、Node.js 24 和独立 PostgreSQL。 [启动与测试命令](CONTRIBUTING.md)
 - **历史预生产验收**覆盖 Keycloak 和 OTP、跨科室权限、双 API、双 Worker、迁移与恢复。产品验收还记录了复诊协助、候补、版本对比、停诊回电和通知补发。 [预生产部署与验收](docs/预生产部署与验收.md) · [产品验收复盘](docs/六项产品需求验收与复盘.md)
