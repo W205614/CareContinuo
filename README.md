@@ -11,7 +11,7 @@ CareContinuo 面向单院多科室的门诊和出院随访。患者可以从同�
 | 使用者 | 实际能力 |
 | --- | --- |
 | 患者 | 预约、退改约和签到，查看已派发的随访、检查进展及站内消息。符合要求的复诊时段无号时可申请协助或候补，收到提醒后自行确认预约。 |
-| 医生与随访人员 | 完成模拟接诊，登记合成出院资料，手工录入或导入 UTF-8 文本及带文本层的 PDF。起草、转派和审核随访，查看原文出处、版本差异与受影响的复诊预约。 |
+| 医生与随访人员 | 完成模拟接诊，登记合成出院资料，手工录入或导入 UTF-8 文本及带文本层的 PDF。起草和审核随访，处理科内转派及院内跨科室交接，查看原文出处、版本差异与受影响的复诊预约。 |
 | 运营与管理员 | 按科室放号，预览停诊影响，分派回电、记录联络结果并查看通知补发进度。合成预生产支持维护科室、人员岗位及随访交接。 |
 
 日常启动默认使用人工随访。按下文配置真实模型后，Agent 从本次授权的资料片段提取原文明确写出的复诊安排或待跟进检查，并返回逐字引用。Java 核对资料版本和出处，医护确认后安排才对患者生效。目前使用站内通知和合成医疗数据。 [外部系统接入边界](docs/P2外部系统接入.md)
@@ -28,7 +28,7 @@ CareContinuo 面向单院多科室的门诊和出院随访。患者可以从同�
 
 ### 拉取 v0.1.3 镜像
 
-从空目录开始。下面取得同一版本的源码编排与发布覆盖文件。在 Windows PowerShell 中可用 `curl.exe` 执行下载命令。
+从空目录开始。源码标签固定镜像构建时的源码及 `compose.yaml`，对应版本的安装说明和覆盖文件见 [v0.1.3 发布页](https://github.com/W205614/CareContinuo/releases/tag/v0.1.3)。在 Windows PowerShell 中可用 `curl.exe` 执行下载命令。
 
 ```sh
 git clone --branch v0.1.3 --depth 1 https://github.com/W205614/CareContinuo.git CareContinuo-v0.1.3
@@ -91,7 +91,7 @@ docker compose -p carecontinuo-image -f compose.yaml -f compose.release.yaml -f 
 
 ## 新版前端实拍
 
-以下实拍采集于 **2026-11-22**，界面对应 [前端改版 `b0f2d91`](https://github.com/W205614/CareContinuo/commit/b0f2d918fb6467d709970aa836744a092bc7824b)，已随 **v0.1.1** 发布。截图使用隔离数据库和合成账号采集。 [历史截图对应的 v0.1.1 版本](https://github.com/W205614/CareContinuo/releases/tag/v0.1.1)历史界面见 [v0.1.0 随访实拍](docs/images/revisit-demo.png)及[合成预生产人员管理](docs/images/staff-admin-demo.png)。
+以下实拍采集于 **2026-11-22**，界面对应前端改版 `b0f2d91`，已随 **v0.1.1** 发布。截图使用隔离数据库和合成账号采集。 [前端改版提交](https://github.com/W205614/CareContinuo/commit/b0f2d918fb6467d709970aa836744a092bc7824b) · [v0.1.1 发布页](https://github.com/W205614/CareContinuo/releases/tag/v0.1.1) · [v0.1.0 随访实拍](docs/images/revisit-demo.png) · [合成预生产人员管理](docs/images/staff-admin-demo.png)
 
 ![新版诊程桥登录页，左侧显示门诊、出院随访和复诊导视，右侧为登录表单](docs/images/workspace-redesign/login.webp)
 
