@@ -2,10 +2,10 @@ import { expect, test } from '@playwright/test'
 import { randomUUID } from 'node:crypto'
 import { book, createSlot, get, loginInBrowser, post, runSql, signedIn, type Session } from './fixtures'
 
-async function setup(owner: Session) {
+async function setup(owner: Session, patient = { reference: 'DEMO-A', name: '患者甲' }) {
   const options = await (await get(owner, '/care-directory')).json()
   const registered = await post(owner, '/episodes', {
-    patientReference: 'DEMO-A', patientName: '患者甲',
+    patientReference: patient.reference, patientName: patient.name,
     reference: `TEST-${randomUUID()}`, careDate: new Date().toISOString().slice(0, 10),
   })
   expect(registered.status()).toBe(201)
@@ -22,6 +22,165 @@ function draft(segmentIds: number[], title: string, text: string) {
 function action(session: Session, id: number, name: string, version: number, extra: object = {}) {
   return post(session, `/followups/${id}/actions`, { action: name, version, ...extra })
 }
+
+function seedHandoffPatient() {
+  const username = `handoff-${randomUUID()}`
+  const reference = username.toUpperCase()
+  const name = '合成交接患者'
+  runSql(`with subject as (
+    insert into patient(reference, display_name) values ('${reference}', '${name}') returning id
+  ), account as (
+    insert into app_user(username, display_name, patient_id, password_hash)
+    select '${username}', '${name}', subject.id, template.password_hash
+    from subject cross join app_user template where template.username = 'patient-a' returning id
+  )
+  insert into user_role(user_id, role) select id, 'PATIENT' from account;`)
+  return { username, reference, name }
+}
+
+async function publishForHandoff(owner: Session, reviewer: Session, episodeId: number, reviewerId: number, sources: number[] = []) {
+  const created = await post(owner, '/followups', {
+    episodeId, reviewerId, draft: draft(sources, '合成跨科室随访', '请更新检查结果。'),
+  })
+  expect(created.status()).toBe(201)
+  const { id } = await created.json()
+  for (const [session, name] of [[owner, 'SUBMIT'], [reviewer, 'APPROVE'], [reviewer, 'DISPATCH']] as const) {
+    expect((await action(session, id, name, 1)).status()).toBe(204)
+  }
+  return id as number
+}
+
+test('AC-21 cross-department handoff through staff inbox limits access and moves active work on acceptance', async ({ page, browser }) => {
+  const synthetic = seedHandoffPatient()
+  const [owner, reviewer, recipient, patient] = await Promise.all(['followup', 'doctor', 'followup-b', synthetic.username].map(signedIn))
+  const { episodeId, reviewerId, secondOwner } = await setup(owner, synthetic)
+  const documents = `/episodes/${episodeId}/documents`
+  expect((await post(owner, documents, { title: '用于随访的合成资料', text: '初次检查的合成依据' })).status()).toBe(201)
+  expect((await post(owner, documents, { title: '与随访无关的资料', text: '不得由交接权限读取的内容' })).status()).toBe(201)
+  const snippets = await (await get(owner, `/episodes/${episodeId}/segments`)).json()
+  const id = await publishForHandoff(owner, reviewer, episodeId, reviewerId, [snippets[0].id])
+  const path = `/followups/${id}`
+  expect((await action(patient, id, 'FEEDBACK', 1, { note: '合成患者反馈' })).status()).toBe(204)
+
+  await loginInBrowser(page, 'followup')
+  await page.goto(`/workspace?followup=${id}`)
+  await page.getByRole('button', { name: '发起跨科室交接' }).click()
+  await page.getByLabel('接手科室与人员').selectOption({ label: '康复门诊 · 周随访员' })
+  await page.getByRole('button', { name: '提交交接' }).click()
+  await expect(page.getByText('交接已发起。对方确认接手前，请继续跟进随访。')).toBeVisible()
+  const handoffs = await (await get(owner, '/followups/handoffs')).json()
+  const handoff = handoffs.find((item: { taskId: number }) => item.taskId === id)
+  const request = `/followups/handoffs/${handoff.id}`
+  expect(Date.parse(handoff.dueAt) - Date.parse(handoff.createdAt)).toBe(86_400_000)
+  expect((await (await get(recipient, request)).json()).taskId).toBeNull()
+  expect((await get(recipient, path)).status()).toBe(404)
+  expect((await get(recipient, `${path}/handoff-sources`)).status()).toBe(404)
+  expect((await get(patient, request)).status()).toBe(404)
+  expect((await get(owner, path)).status()).toBe(200)
+
+  const recipientPage = await browser.newPage()
+  await loginInBrowser(recipientPage, 'followup-b')
+  const inbox = recipientPage.getByRole('region', { name: '工作待办' })
+  await inbox.locator(`a[href="/workspace?handoff=${handoff.id}"]`).click()
+  const detail = recipientPage.getByRole('article', { name: '交接详情' })
+  await expect(detail).toContainText('待接手')
+  await expect(detail.getByRole('link', { name: '打开随访' })).toHaveCount(0)
+  await detail.getByRole('button', { name: '确认接手' }).click()
+  await expect(detail).toContainText('已接手')
+  await detail.getByRole('link', { name: '打开随访' }).click()
+  await expect(recipientPage.locator('.followup-detail')).toContainText('初次检查的合成依据')
+  await expect(recipientPage.locator('.followup-detail').getByText('定位原文')).toHaveCount(0)
+  expect((await get(owner, path)).status()).toBe(404)
+  expect((await action(owner, id, 'CONTACT', 1, { note: '原负责人尝试写入' })).status()).toBe(404)
+  expect((await get(recipient, documents)).status()).toBe(404)
+  expect((await get(reviewer, path)).status()).toBe(200)
+  expect((await (await get(patient, path)).json()).instructions).toBe('请更新检查结果。')
+  const current = await (await get(recipient, path)).json()
+  expect(current.ownerId).toBe(secondOwner)
+  expect(current.ownerDepartmentId).not.toBe(current.departmentId)
+  const assigned = await (await get(recipient, `/work-items/page?state=OPEN&departmentId=${current.ownerDepartmentId}`)).json()
+  expect(assigned.work).toEqual(expect.arrayContaining([expect.objectContaining({ objectId: id, kind: 'PATIENT_FEEDBACK' })]))
+  expect((await action(recipient, id, 'CONTACT', 1, { note: '接手后补记联系' })).status()).toBe(204)
+  await page.getByRole('button', { name: '刷新交接' }).click()
+  await expect(page.locator(`[data-handoff-id="${handoff.id}"]`)).toContainText('已接手')
+
+  const reference = (await (await get(owner, documents)).json()).find((item: { title: string }) => item.title === '用于随访的合成资料')
+  expect((await post(owner, documents, { documentId: reference.id, title: reference.title, text: '更新后的合成依据' })).status()).toBe(201)
+  const sources = await (await get(recipient, `${path}/handoff-sources`)).json()
+  expect(sources.map((source: { excerpt: string }) => source.excerpt)).toEqual(['更新后的合成依据'])
+  expect((await post(recipient, `${path}/draft`, {
+    version: 1, draft: draft([snippets[1].id], '越权引用', '超出交接范围'),
+  })).status()).toBe(409)
+  await recipientPage.reload()
+  await recipientPage.getByRole('button', { name: '编辑草稿' }).click()
+  await recipientPage.getByRole('textbox', { name: '安排内容' }).fill('请按更正后的资料跟进。')
+  await recipientPage.getByText('选择资料出处', { exact: false }).click()
+  await recipientPage.getByRole('checkbox', { name: /更新后的合成依据/ }).check()
+  await recipientPage.getByRole('button', { name: '保存随访草稿' }).click()
+  await expect(recipientPage.getByText('草稿已保存。')).toBeVisible()
+  for (const [session, name] of [[recipient, 'SUBMIT'], [reviewer, 'APPROVE'], [reviewer, 'DISPATCH']] as const) {
+    expect((await action(session, id, name, 2)).status()).toBe(204)
+  }
+  expect((await (await get(patient, path)).json()).instructions).toBe('请按更正后的资料跟进。')
+  expect(runSql(`select action from audit_log where object_type = 'FOLLOWUP_HANDOFF' and object_id = ${handoff.id} order by id`))
+    .toBe('REQUEST\nACCEPTED')
+  await recipientPage.close()
+})
+
+test('AC-21 returned, expired and superseded handoffs keep responsibility and audit one outcome', async () => {
+  const [owner, reviewer, recipient] = await Promise.all(['followup', 'doctor', 'followup-b'].map(signedIn))
+  const { episodeId, reviewerId, secondOwner } = await setup(owner, seedHandoffPatient())
+  const id = await publishForHandoff(owner, reviewer, episodeId, reviewerId)
+  const path = `/followups/${id}`
+  const { departmentId } = (await (await get(owner, `${path}/handoff-assignees`)).json())
+    .find((row: { id: number; department: string }) => row.id === secondOwner && row.department === '康复门诊')
+  const input = { departmentId, recipientId: secondOwner, version: 1 }
+  async function start() {
+    const started = await post(owner, `${path}/handoffs`, input)
+    expect(started.status()).toBe(201)
+    return (await started.json()).id as number
+  }
+  const detail = (handoffId: number) => get(owner, `/followups/handoffs/${handoffId}`).then(response => response.json())
+  const decision = (session: Session, handoffId: number, payload: object) =>
+    post(session, `/followups/handoffs/${handoffId}/decision`, payload)
+  const ownDept = (await (await get(owner, path)).json()).ownerDepartmentId
+  expect((await post(owner, `${path}/handoffs`, { ...input, departmentId: ownDept })).status()).toBe(400)
+  const returned = await start()
+  expect((await post(owner, `${path}/handoffs`, input)).status()).toBe(409)
+  expect((await decision(owner, returned, { action: 'ACCEPT' })).status()).toBe(404)
+  runSql(`delete from staff_department where user_id = ${secondOwner} and department_id = ${departmentId}`)
+  try {
+    expect((await get(recipient, `/followups/handoffs/${returned}`)).status()).toBe(404)
+    expect((await decision(recipient, returned, { action: 'ACCEPT' })).status()).toBe(404)
+    const work = (await (await get(recipient, '/work-items')).json()) as { kind: string; objectId: number }[]
+    expect(work.some(item => item.kind === 'FOLLOWUP_HANDOFF' && item.objectId === returned)).toBe(false)
+  } finally {
+    runSql(`insert into staff_department(user_id, department_id) values (${secondOwner}, ${departmentId})`)
+  }
+  expect((await decision(recipient, returned, { action: 'RETURN', reason: ' ' })).status()).toBe(400)
+  const outcomes = await Promise.all([1, 2].map(() => decision(recipient, returned, { action: 'RETURN', reason: '接手人当班无法跟进' })))
+  expect(outcomes.map(response => response.status()).sort()).toEqual([204, 409])
+  expect(await detail(returned)).toMatchObject({ status: 'RETURNED', returnReason: '接手人当班无法跟进', taskId: id })
+  expect((await get(recipient, path)).status()).toBe(404)
+
+  const timeout = await start()
+  runSql(`update followup_handoff set due_at = now() - interval '1 second' where id = ${timeout}`)
+  expect((await decision(recipient, timeout, { action: 'ACCEPT' })).status()).toBe(409)
+  await expect.poll(async () => (await detail(timeout)).status, { timeout: 15_000 }).toBe('TIMED_OUT')
+  expect((await action(owner, id, 'CONTACT', 1, { note: '超时后由原负责人继续联系' })).status()).toBe(204)
+
+  const superseded = await start()
+  expect((await post(owner, `/episodes/${episodeId}/documents`, { title: '资料更正', text: '合成补充' })).status()).toBe(201)
+  expect((await decision(recipient, superseded, { action: 'ACCEPT' })).status()).toBe(409)
+  await expect.poll(async () => (await detail(superseded)).status, { timeout: 15_000 }).toBe('SUPERSEDED')
+  expect((await get(owner, path)).status()).toBe(200)
+  expect((await get(recipient, path)).status()).toBe(404)
+  expect(runSql(`select action || ':' || (actor_id is null)::text from audit_log where object_type = 'FOLLOWUP_HANDOFF'
+    and object_id in (${returned}, ${timeout}, ${superseded}) and action <> 'REQUEST' order by object_id`))
+    .toBe('RETURNED:false\nTIMED_OUT:true\nSUPERSEDED:true')
+  expect(runSql(`select count(*) from work_item where kind = 'FOLLOWUP_HANDOFF'
+    and object_id in (${returned}, ${timeout}, ${superseded}) and status = 'OPEN'`)).toBe('0')
+})
 
 test('AC-05 and AC-09 document changes invalidate the old approval and link patient corrections', async ({ browser }) => {
   const [owner, reviewer, patient, other, operator] = await Promise.all(['followup', 'doctor', 'patient-a', 'patient-b', 'operations'].map(signedIn))

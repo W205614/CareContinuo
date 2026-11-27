@@ -36,7 +36,7 @@ const deliveryLabels: Record<DeliveryStatus, string> = {
 }
 let deliveryTimer: number | undefined
 let checkingDelivery = false
-const kinds: Record<string, string> = { STOPPED_APPOINTMENT: '停诊预约', STOP_CALLBACK: '停诊回电', NOTIFICATION_FAILED: '通知发送失败', SOURCE_CHANGED: '更新随访草稿', FOLLOWUP_REVIEW: '审核随访', FOLLOWUP_OVERDUE: '随访逾期', PATIENT_FEEDBACK: '患者反馈', FOLLOWUP_TRANSFER: '接手随访', AGENT_CONFLICT: '核实 AI 发现的资料冲突', FOLLOWUP_REQUEST: '患者协助或反馈' }
+const kinds: Record<string, string> = { STOPPED_APPOINTMENT: '停诊预约', STOP_CALLBACK: '停诊回电', NOTIFICATION_FAILED: '通知发送失败', SOURCE_CHANGED: '更新随访草稿', FOLLOWUP_REVIEW: '审核随访', FOLLOWUP_OVERDUE: '随访逾期', PATIENT_FEEDBACK: '患者反馈', FOLLOWUP_TRANSFER: '接手随访', AGENT_CONFLICT: '核实 AI 发现的资料冲突', FOLLOWUP_REQUEST: '患者协助或反馈', FOLLOWUP_HANDOFF: '跨科室随访交接' }
 
 async function refresh() {
   try {

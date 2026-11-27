@@ -146,7 +146,7 @@ async function publishResult() {
           <label v-if="replyNeedsUpdate">下次更新时间（北京时间）<input v-model="nextUpdate" type="datetime-local" required /></label>
           <label>患者可见回复<textarea v-model.trim="reply" maxlength="2000" required /></label>
           <button :disabled="busy">发布回复</button>
-          <DepartmentTemplates :department-id="task.departmentId" kind="REPLY" :content="reply"
+          <DepartmentTemplates :department-id="task.ownerDepartmentId" kind="REPLY" :content="reply"
             @apply="template => reply = template.content" />
         </form>
       </li>

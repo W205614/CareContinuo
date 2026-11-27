@@ -11,6 +11,7 @@ export interface SourceContext {
 export interface DocumentVersion { id: number; title: string; versionId: number; versionNumber: number; filename: string; createdAt: string }
 export interface Followup {
   id: number; episodeId: number; reference: string; patient: string; ownerId: number; ownerName: string; reviewerId: number; departmentId: number; status: string;
+  ownerDepartmentId: number;
   version: number; needsReview: boolean; kind: string; title: string; instructions: string | null; dueAt: string;
   revisitFrom: string | null; revisitTo: string | null; revisitDepartmentId: number | null; revisitDepartment: string | null;
   manualReference: string | null; sources: Source[];
@@ -21,6 +22,7 @@ export interface Followup {
   resultUpdates: { stage: string; patientMessage: string | null; createdAt: string }[];
   reviews: { id: number; decision: string; reason: string | null; createdAt: string }[];
 }
+export interface HandoffAssignee { departmentId: number; department: string; id: number; name: string }
 export interface RevisionComparison {
   version: number; title: string; kind: string; revisitDepartment: string | null; revisitFrom: string | null; revisitTo: string | null
   dueAt: string; instructions: string; manualReference: string | null; sources: Source[]

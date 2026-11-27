@@ -70,7 +70,7 @@ async function signOut() {
         <FollowupView v-if="followup"
           :actor="actor" :refresh-version="appointmentChange" :task-id="target('followup')" :request-id="target('request')"
           :revisit-appointment-id="target('revisitAppointment')" :progress-target="route.query.progress === 'result'"
-          :episode-target="target('episode')" @booked="followupChange++" @changed="followupChange++" />
+          :episode-target="target('episode')" :handoff-id="target('handoff')" @booked="followupChange++" @changed="followupChange++" />
         <AdminView v-if="admin" />
         <InboxView v-if="patient" :actor="actor" :refresh-version="activity + inboxChange" @read-message="inboxChange++" />
       </div>
