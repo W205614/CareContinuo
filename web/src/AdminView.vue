@@ -19,8 +19,10 @@ interface Staff extends StaffInput {
 interface Assignment {
   id: number
   episodeId: number
+  departmentId: number
   status: string
   ownerUnavailable: boolean
+  ownerDepartmentId: number
   reviewerUnavailable: boolean
 }
 const roles: Record<string, string> = { ADMIN: '管理员', OPERATIONS: '运营', DOCTOR: '接诊医生', FOLLOWUP: '随访人员', REVIEWER: '审核员' }
@@ -198,11 +200,11 @@ onMounted(() => perform(load))
       <form v-else class="field-grid" @submit.prevent="reassign(row.id)">
         <label>接替负责人<select v-model.number="nextOwner">
           <option :value="0">保留当前负责人</option>
-          <option v-for="person in staff.filter((s) => s.enabled && s.roles.includes('FOLLOWUP') && s.departmentIds.includes(selection))" :key="person.id" :value="person.id">{{ person.displayName }}</option>
+          <option v-for="person in staff.filter((s) => s.enabled && s.roles.includes('FOLLOWUP') && s.departmentIds.includes(row.ownerDepartmentId))" :key="person.id" :value="person.id">{{ person.displayName }}</option>
         </select></label>
         <label>接替审核人<select v-model.number="nextReviewer">
           <option :value="0">保留当前审核人</option>
-          <option v-for="person in staff.filter((s) => s.enabled && s.roles.includes('REVIEWER') && s.departmentIds.includes(selection))" :key="person.id" :value="person.id">{{ person.displayName }}</option>
+          <option v-for="person in staff.filter((s) => s.enabled && s.roles.includes('REVIEWER') && s.departmentIds.includes(row.departmentId))" :key="person.id" :value="person.id">{{ person.displayName }}</option>
         </select></label>
         <button :disabled="busy">确认交接</button>
       </form>

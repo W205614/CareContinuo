@@ -11,7 +11,7 @@ public class AuditLog {
         this.jdbc = jdbc;
     }
 
-    public void record(long actorId, String type, long id, String action) {
+    public void record(Long actorId, String type, long id, String action) {
         jdbc.sql("insert into audit_log(actor_id, object_type, object_id, action) values (?, ?, ?, ?)")
                 .params(actorId, type, id, action).update();
     }

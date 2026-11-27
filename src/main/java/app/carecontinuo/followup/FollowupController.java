@@ -1,5 +1,6 @@
 package app.carecontinuo.followup;
 
+import app.carecontinuo.care.Episodes;
 import app.carecontinuo.identity.Accounts;
 import app.carecontinuo.scheduling.Appointments;
 import app.carecontinuo.scheduling.Schedule;
@@ -29,19 +30,54 @@ class FollowupController {
     private final Revisits revisits;
     private final RevisitWatches watches;
     private final FollowupTemplates templates;
+    private final DepartmentHandoffs handoffs;
 
     FollowupController(Accounts accounts, Followups followups, Revisits revisits, RevisitWatches watches,
-                       FollowupTemplates templates) {
+                       FollowupTemplates templates, DepartmentHandoffs handoffs) {
         this.accounts = accounts;
         this.followups = followups;
         this.revisits = revisits;
         this.watches = watches;
         this.templates = templates;
+        this.handoffs = handoffs;
     }
 
     @GetMapping
     List<Followups.View> list(Principal principal, @RequestParam(defaultValue = "false") boolean actionable) {
         return followups.list(accounts.actor(principal), actionable);
+    }
+
+    @GetMapping("/handoffs")
+    List<DepartmentHandoffs.View> handoffs(Principal principal) {
+        return handoffs.list(accounts.actor(principal));
+    }
+
+    @GetMapping("/handoffs/{id}")
+    DepartmentHandoffs.View handoff(Principal principal, @PathVariable @Positive long id) {
+        return handoffs.get(accounts.actor(principal), id);
+    }
+
+    @PostMapping("/handoffs/{id}/decision")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    void decideHandoff(Principal principal, @PathVariable @Positive long id, @Valid @RequestBody DepartmentHandoffs.Decision input) {
+        handoffs.decide(accounts.actor(principal), id, input);
+    }
+
+    @GetMapping("/{id}/handoff-assignees")
+    List<DepartmentHandoffs.Assignee> handoffAssignees(Principal principal, @PathVariable @Positive long id) {
+        return handoffs.assignees(accounts.actor(principal), id);
+    }
+
+    @PostMapping("/{id}/handoffs")
+    @ResponseStatus(HttpStatus.CREATED)
+    Map<String, Long> startHandoff(Principal principal, @PathVariable @Positive long id,
+                                   @Valid @RequestBody DepartmentHandoffs.Start input) {
+        return Map.of("id", handoffs.start(accounts.actor(principal), id, input));
+    }
+
+    @GetMapping("/{id}/handoff-sources")
+    List<Episodes.Segment> handoffSources(Principal principal, @PathVariable @Positive long id) {
+        return followups.handoffSources(accounts.actor(principal), id);
     }
 
     @GetMapping("/templates")

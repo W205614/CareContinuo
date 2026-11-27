@@ -45,8 +45,9 @@ public class Notifications {
 
     private static final String CAN_ACCESS_WORK = """
             (w.owner_id = :actor or (w.owner_id is null and w.role = 'OPERATIONS'))
-            and (:demo or exists(select 1 from work_item_department scope join staff_department sd
-                on sd.department_id = scope.department_id where scope.id = w.id and sd.user_id = :actor))
+            and exists(select 1 from work_item_department scope where scope.id = w.id and
+                ((:demo and not scope.strict_department) or exists(select 1 from staff_department sd
+                    where sd.department_id = scope.department_id and sd.user_id = :actor)))
             and exists(select 1 from app_user u join user_role r on r.user_id = u.id
               where u.id = :actor and u.enabled and r.role = w.role)
             """;
@@ -54,12 +55,13 @@ public class Notifications {
     private static final String WORK_VIEW = """
             select w.id, w.kind, w.object_id, w.status, w.due_at, w.resolution, owner.display_name as owner,
               case when w.kind in ('STOPPED_APPOINTMENT', 'STOP_CALLBACK') then 'appointment'
+                   when w.kind = 'FOLLOWUP_HANDOFF' then 'handoff'
                    when ev.episode_id is not null or req.id is not null or w.kind in ('FOLLOWUP_OVERDUE',
                      'FOLLOWUP_REVIEW', 'PATIENT_FEEDBACK', 'FOLLOWUP_TRANSFER', 'SOURCE_CHANGED') then 'followup'
                    when ev.kind in ('APPOINTMENT_STOPPED', 'APPOINTMENT_CALLBACK_UPDATED') then 'appointment'
                    when j.id is not null then 'episode' end as target_type,
               case when w.kind in ('STOPPED_APPOINTMENT', 'STOP_CALLBACK', 'FOLLOWUP_OVERDUE', 'FOLLOWUP_REVIEW', 'PATIENT_FEEDBACK',
-                'FOLLOWUP_TRANSFER', 'SOURCE_CHANGED') then w.object_id
+                'FOLLOWUP_TRANSFER', 'SOURCE_CHANGED', 'FOLLOWUP_HANDOFF') then w.object_id
                 else coalesce(req.task_id, j.episode_id, case
                   when ev.episode_id is not null or ev.kind in ('APPOINTMENT_STOPPED', 'APPOINTMENT_CALLBACK_UPDATED')
                     then ev.object_id end) end as target_id,

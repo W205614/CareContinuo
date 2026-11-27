@@ -3,15 +3,16 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { api, mutate, type Actor } from './api'
 import { appointmentStates, noRevisitSlots, revisitQuery, type RevisitFilters, type RevisitSlotPage, type Schedule, type Slot } from './appointments'
 import RevisitSlotFilters from './RevisitSlotFilters.vue'
-import { feedbackKinds, followupStates, requestOutcomes, type CareEpisode, type Directory, type DocumentVersion, type Followup, type Revisit, type Source } from './followup'
+import { feedbackKinds, followupStates, requestOutcomes, type CareEpisode, type Directory, type DocumentVersion, type Followup, type HandoffAssignee, type Revisit, type Source } from './followup'
 import { fromShanghaiInput, shanghaiTime } from './time'
 import AgentSuggestions, { type Candidate } from './AgentSuggestions.vue'
 import FollowupRequests from './FollowupRequests.vue'
+import FollowupHandoffs from './FollowupHandoffs.vue'
 import RevisionReview from './RevisionReview.vue'
 import SourceCitations from './SourceCitations.vue'
 import DepartmentTemplates from './DepartmentTemplates.vue'
 
-const props = defineProps<{ actor: Actor; refreshVersion: number; taskId?: number; requestId?: number; episodeTarget?: number; revisitAppointmentId?: number; progressTarget?: boolean }>()
+const props = defineProps<{ actor: Actor; refreshVersion: number; taskId?: number; requestId?: number; episodeTarget?: number; revisitAppointmentId?: number; progressTarget?: boolean; handoffId?: number }>()
 const emit = defineEmits<{ booked: []; changed: [] }>()
 const patient = props.actor.roles.includes('PATIENT')
 const followup = props.actor.roles.includes('FOLLOWUP')
@@ -28,6 +29,9 @@ const documents = ref<DocumentVersion[]>([])
 const sources = ref<Source[]>([])
 const detail = ref<Followup>()
 const editing = ref<number>()
+const handoffVersion = ref(0)
+const handoffAssignees = ref<HandoffAssignee[]>()
+const handoffAssignee = ref<number>()
 const error = ref('')
 const notice = ref('')
 const bookingError = ref('')
@@ -57,6 +61,11 @@ const active = computed(() => !!detail.value && ['DISPATCHED', 'PATIENT_REPLIED'
 const canEdit = computed(() => !!detail.value && ['DRAFT', 'APPROVED'].includes(detail.value.status) && detail.value.ownerId === props.actor.id)
 const canManage = computed(() => !!detail.value && !['VERIFIED', 'CLOSED'].includes(detail.value.status) && detail.value.ownerId === props.actor.id)
 const canReview = computed(() => !!detail.value && reviewer && detail.value.reviewerId === props.actor.id)
+const canStartHandoff = computed(() => !!detail.value && followup && canManage.value && active.value && !detail.value.needsReview
+  && props.actor.departmentIds.includes(detail.value.ownerDepartmentId))
+const crossDepartmentOwner = computed(() => !!detail.value && followup && detail.value.ownerId === props.actor.id
+  && detail.value.ownerDepartmentId !== detail.value.departmentId)
+const crossDepartmentEditing = computed(() => !!editing.value && crossDepartmentOwner.value)
 const selectedEpisode = computed(() => episodes.value.find((item) => item.id === episodeId.value))
 const sourceVersion = computed(() => selectedEpisode.value?.sourceVersion ?? 0)
 const selectedReply = computed(() => patient && props.taskId === detail.value?.id && props.requestId
@@ -78,6 +87,7 @@ const canAsk = computed(() => patient && revisitPlanning.value && (availability.
 async function refresh() {
   if (patient) await loadHistory()
   else tasks.value = await api<Followup[]>('/followups')
+  if (followup) handoffVersion.value++
   if (!patient) {
     const [rows, choices, schedule] = await Promise.all([
       api<CareEpisode[]>('/episodes'), api<Directory>('/care-directory'),
@@ -135,6 +145,11 @@ async function chooseEpisode(id: number) {
   }
 }
 
+function selectEpisode(id: number) {
+  editing.value = undefined
+  return chooseEpisode(id)
+}
+
 function addEpisode() {
   return run(async () => {
     const created = await mutate<{ id: number }>('/episodes', discharge.value)
@@ -188,12 +203,14 @@ async function showTask(id: number) {
   const load = ++taskLoad
   error.value = ''
   if (detail.value?.id !== id) {
+    editing.value = undefined
     detail.value = undefined
     bookingError.value = ''
     bookingNotice.value = ''
     filters.value = {}
   }
   action.value.name = ''
+  handoffAssignees.value = undefined
   action.value.encounterId = 0
   availability.value = undefined
   slotWatch.value = undefined
@@ -211,7 +228,11 @@ async function showTask(id: number) {
     }
     return load === taskLoad
   } catch (failure) {
-    if (load === taskLoad) error.value = (failure as Error).message
+    if (load === taskLoad) {
+      detail.value = undefined
+      editing.value = undefined
+      error.value = (failure as Error).message
+    }
     return false
   }
 }
@@ -223,7 +244,19 @@ function applyDraftTemplate(template: typeof draftTemplates[number]) {
 }
 
 async function edit(item: Followup) {
-  await chooseEpisode(item.episodeId)
+  if (crossDepartmentOwner.value) {
+    await chooseEpisode(0)
+    try {
+      const snippets = await api<Source[]>(`/followups/${item.id}/handoff-sources`)
+      if (detail.value?.id !== item.id) return
+      sources.value = snippets
+    } catch (failure) {
+      error.value = (failure as Error).message
+      return
+    }
+  } else {
+    await chooseEpisode(item.episodeId)
+  }
   editing.value = item.id
   const shanghaiDate = new Date(new Date(item.dueAt).getTime() + 8 * 3_600_000)
   draft.value = { reviewerId: item.reviewerId, kind: item.kind, title: item.title,
@@ -232,6 +265,36 @@ async function edit(item: Followup) {
     revisitDepartmentId: item.revisitDepartmentId ?? 0,
     segmentIds: item.sources.map((source) => source.id).filter((id) => sources.value.some((source) => source.id === id)),
     manualReference: item.manualReference ?? '' }
+}
+
+async function chooseHandoffAssignee() {
+  const item = detail.value
+  if (!item) return
+  action.value.name = 'HANDOFF'
+  error.value = ''
+  handoffAssignees.value = undefined
+  handoffAssignee.value = undefined
+  try {
+    const choices = await api<HandoffAssignee[]>(`/followups/${item.id}/handoff-assignees`)
+    if (detail.value?.id === item.id && action.value.name === 'HANDOFF') handoffAssignees.value = choices
+  } catch (failure) {
+    if (detail.value?.id === item.id && action.value.name === 'HANDOFF') {
+      action.value.name = ''
+      error.value = (failure as Error).message
+    }
+  }
+}
+
+function startHandoff() {
+  const item = detail.value
+  const choice = handoffAssignee.value === undefined ? undefined : handoffAssignees.value?.[handoffAssignee.value]
+  if (!item || !choice) return
+  return run(async () => {
+    await mutate(`/followups/${item.id}/handoffs`, {
+      version: item.version, departmentId: choice.departmentId, recipientId: choice.id,
+    })
+    action.value.name = ''
+  }, '交接已发起。对方确认接手前，请继续跟进随访。')
 }
 
 function saveDraft() {
@@ -355,7 +418,7 @@ watch([() => props.taskId, () => props.requestId, () => props.revisitAppointment
 }, { immediate: true })
 watch(() => props.episodeTarget, async (id) => {
   if (!id || !followup) return
-  await chooseEpisode(id)
+  await selectEpisode(id)
   await nextTick()
   document.getElementById('episode-work')?.scrollIntoView({ block: 'start' })
 }, { immediate: true })
@@ -369,7 +432,7 @@ async function requestChanged() {
 
 <template>
   <section class="panel" aria-labelledby="followup-title">
-    <div class="section-heading"><h2 id="followup-title">{{ patient ? '我的随访' : '随访工作台' }}</h2><button type="button" class="secondary" @click="refresh">刷新</button></div>
+    <div class="section-heading"><h2 id="followup-title">{{ patient ? '我的随访' : '随访工作台' }}</h2><button type="button" class="secondary" @click="requestChanged">刷新</button></div>
     <p v-if="error" role="alert" class="error">{{ error }}</p>
     <p v-if="notice" role="status">{{ notice }}</p>
     <p v-if="patient">留言由医护在工作日 09:00–17:00（北京时间）查看。紧急情况请使用当地急救服务。</p>
@@ -385,8 +448,9 @@ async function requestChanged() {
           <button :disabled="busy">登记出院记录</button>
         </form>
       </details>
-      <label class="episode-selection">诊疗记录<select :value="episodeId" @change="chooseEpisode(Number(($event.target as HTMLSelectElement).value))"><option :value="0">请选择诊疗记录</option><option v-for="item in episodes" :key="item.id" :value="item.id">{{ item.patient }} · {{ item.reference }}</option></select></label>
-      <template v-if="episodeId">
+      <label class="episode-selection">诊疗记录<select :value="episodeId" @change="selectEpisode(Number(($event.target as HTMLSelectElement).value))"><option :value="0">请选择诊疗记录</option><option v-for="item in episodes" :key="item.id" :value="item.id">{{ item.patient }} · {{ item.reference }}</option></select></label>
+      <template v-if="episodeId || crossDepartmentEditing">
+        <template v-if="!crossDepartmentEditing">
         <details>
           <summary>导入和更正资料</summary>
           <form class="field-grid" @submit.prevent="addDocument">
@@ -401,8 +465,10 @@ async function requestChanged() {
             :href="`/api/v1/episodes/${episodeId}/versions/${item.versionId}/download`">下载附件</a></li></ul>
         </details>
         <div id="episode-work"><AgentSuggestions :episode-id="episodeId" :source-version="sourceVersion" @use="adopt" /></div>
+        </template>
         <form class="panel draft-form" @submit.prevent="saveDraft">
           <h3>{{ editing ? `更正随访草稿 ${editing}` : '新建随访草稿' }}</h3>
+          <p v-if="crossDepartmentEditing">可以引用本随访已引用资料的最新版本。原科室继续维护诊疗资料并审核草稿。</p>
           <details v-if="!editing">
             <summary>使用随访草稿模板</summary>
             <div class="row-actions">
@@ -431,6 +497,8 @@ async function requestChanged() {
         </form>
       </template>
     </div>
+    <FollowupHandoffs v-if="followup" :actor-id="actor.id" :handoff-id="handoffId"
+      :refresh-version="handoffVersion" @changed="requestChanged" />
     <form v-if="patient" class="field-grid" @submit.prevent="loadHistory()">
       <label>随访历史状态<select v-model="historyClosed">
         <option value="">全部随访</option><option value="false">待处理</option><option value="true">已结束</option>
@@ -463,7 +531,7 @@ async function requestChanged() {
       <template v-else>
         <p v-if="detail.instructions" class="preserve-lines">{{ detail.instructions }}</p>
         <p v-if="detail.manualReference">手工依据 · {{ detail.manualReference }}</p>
-        <SourceCitations :episode-id="detail.episodeId" :sources="detail.sources" />
+        <SourceCitations :episode-id="detail.episodeId" :sources="detail.sources" :excerpt-only="crossDepartmentOwner" />
       </template>
       <ul v-if="detail.reviews.length" class="source-list"><li v-for="item in detail.reviews" :key="item.id">{{ item.decision === 'APPROVED' ? '审核通过' : '退回修改' }}{{ item.reason ? ` · ${item.reason}` : '' }}</li></ul>
       <ul v-if="detail.feedback.length" class="source-list"><li v-for="item in detail.feedback" :key="item.id">{{ feedbackKinds[item.kind] }} · {{ item.actor }} · {{ shanghaiTime(item.createdAt) }} · {{ item.detail }}<span v-if="item.sourceEncounterId"> · 接诊 #{{ item.sourceEncounterId }}</span></li></ul>
@@ -525,14 +593,28 @@ async function requestChanged() {
         <button v-if="canManage && active" type="button" @click="action.name = 'VERIFY'">核实结果</button>
         <button v-if="canManage" type="button" class="secondary" @click="action.name = 'CONTACT'">记录人工联系</button>
         <button v-if="canManage" type="button" class="secondary" @click="action.name = 'TRANSFER'">转派</button>
+        <button v-if="canStartHandoff && action.name !== 'HANDOFF'" type="button" class="secondary" @click="chooseHandoffAssignee">发起跨科室交接</button>
         <button v-if="canManage" type="button" class="secondary" @click="action.name = 'CLOSE'">人工结案</button>
       </div>
-      <form v-if="action.name" class="field-grid" @submit.prevent="apply(action.name)">
+      <form v-if="action.name && action.name !== 'HANDOFF'" class="field-grid" @submit.prevent="apply(action.name)">
         <label v-if="action.name === 'VERIFY' && visits.some((item) => item.completedAt)">核实依据<select v-model.number="action.encounterId"><option :value="0">人工核实记录</option><option v-for="item in visits.filter((row) => row.completedAt)" :key="item.appointmentId" :value="item.encounterId">接诊 #{{ item.encounterId }} · {{ shanghaiTime(item.completedAt!) }}</option></select></label>
         <label v-if="action.name === 'TRANSFER'">接手人<select v-model.number="action.newOwnerId" required><option :value="0">选择接手人</option><option v-for="item in directory.owners.filter((item) => item.id !== actor.id)" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
         <label v-if="action.name === 'CLOSE'">结案原因<select v-model="action.closureReason"><option value="UNREACHABLE">无法联系</option><option value="REFUSED">患者拒绝</option><option value="WRONG_TASK">任务录错</option></select></label>
         <label>{{ action.name === 'VERIFY' ? '处理依据（仅医护可见）' : '处理依据' }}<textarea v-model.trim="action.note" maxlength="2000" required /></label>
         <button :disabled="busy">确认提交</button>
+      </form>
+      <form v-if="action.name === 'HANDOFF'" class="field-grid" @submit.prevent="startHandoff">
+        <p>接手期限为 24 小时。对方确认前，随访仍由你负责。</p>
+        <p v-if="!handoffAssignees">正在加载可接手人员。</p>
+        <p v-else-if="!handoffAssignees.length">暂无可接手的其他科室随访人员。</p>
+        <label v-else>接手科室与人员<select v-model="handoffAssignee" required>
+          <option :value="undefined" disabled>请选择接手科室与人员</option>
+          <option v-for="(item, index) in handoffAssignees" :key="`${item.departmentId}-${item.id}`" :value="index">{{ item.department }} · {{ item.name }}</option>
+        </select></label>
+        <div class="row-actions">
+          <button v-if="handoffAssignees?.length" :disabled="busy || handoffAssignee === undefined">提交交接</button>
+          <button type="button" class="secondary" @click="action.name = ''">取消发起</button>
+        </div>
       </form>
     </article>
   </section>

@@ -29,7 +29,8 @@ public class Episodes {
             (:demo or exists(select 1 from staff_department sd
                 where sd.user_id = :actor and sd.department_id = e.department_id))
             and (e.owner_id = :actor and :followup or exists (select 1 from followup_task t where t.episode_id = e.id
-            and (t.owner_id = :actor and :followup or t.reviewer_id = :actor and :reviewer))
+            and (t.owner_id = :actor and :followup and t.owner_department_id = e.department_id
+                or t.reviewer_id = :actor and :reviewer))
             or (:doctor and exists (select 1 from encounter visit join doctor d on d.id = visit.doctor_id
             where visit.id = e.encounter_id and d.user_id = :actor)))
             """;
@@ -162,13 +163,21 @@ public class Episodes {
     }
 
     public List<Segment> currentSegments(long id) {
+        return currentSegments(id, null);
+    }
+
+    public List<Segment> currentSegments(long id, Long citedByRevision) {
         return jdbc.sql("""
                 select g.id, s.title, v.id as version_id, v.version_number, g.page_number, g.line_number, g.excerpt
                 from source_document s join lateral (select id, version_number from document_version
                     where document_id = s.id order by version_number desc limit 1) v on true
                 join document_segment g on g.version_id = v.id
-                where s.episode_id = ? order by s.id, g.id
-                """).param(id).query(Segment.class).list();
+                where s.episode_id = :episode and (cast(:revision as bigint) is null or exists (
+                    select 1 from followup_revision_source r join document_segment prior on prior.id = r.segment_id
+                    join document_version original on original.id = prior.version_id
+                    where r.revision_id = :revision and original.document_id = s.id))
+                order by s.id, g.id
+                """).param("episode", id).param("revision", citedByRevision).query(Segment.class).list();
     }
 
     public SourceContext sourceContext(Actor actor, long episodeId, long segmentId) {
